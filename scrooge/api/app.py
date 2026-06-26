@@ -60,11 +60,24 @@ def overview():
     settled = safe_float(state["settledCash"])
     pending_buys = max(0, safe_float(state["cash"]) - settled)
 
+    # Token costs
+    session_tokens = {
+        "inputTokens": state.get("sessionInputTokens", 0),
+        "outputTokens": state.get("sessionOutputTokens", 0),
+        "totalCost": round(state.get("sessionInputCost", 0) + state.get("sessionOutputCost", 0), 5),
+    }
+
+    # Today's daily P&L and token cost side by side
+    daily_pnl = safe_float(state["dailyPnL"])
+    daily_token_cost = session_tokens["totalCost"]
+
     return jsonify({
         "cash": safe_float(state["cash"]),
         "settledCash": settled,
         "totalEquity": round(total_equity, 2),
-        "dailyPnL": safe_float(state["dailyPnL"]),
+        "dailyPnL": daily_pnl,
+        "dailyTokenCost": daily_token_cost,
+        "sessionTokens": session_tokens,
         "positionsCount": len(state.get("positions", [])),
         "pendingBuys": round(pending_buys, 2),
         "halted": state.get("halted", False),
@@ -213,6 +226,70 @@ def trades():
 
     return jsonify({
         "trades": all_trades[:limit],
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  GET /api/token-stats?days=30
+#  Token usage and cost history. Also includes ROI ratio.
+# ─────────────────────────────────────────────────────────────────────────
+@app.route("/api/token-stats")
+def token_stats():
+    state = load_state()
+    if isinstance(state, tuple):
+        return jsonify(state[0]), state[1]
+
+    days = request.args.get("days", 30, type=int)
+    history = state.get("tokenCosts", [])
+
+    # Build daily cost map
+    cost_map = {}
+    for entry in history:
+        cost_map[entry["date"]] = {
+            "inputTokens": entry.get("inputTokens", 0),
+            "outputTokens": entry.get("outputTokens", 0),
+            "totalCost": entry.get("totalCost", 0),
+        }
+
+    # Add current session as today's provisional entry
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    session_input = state.get("sessionInputTokens", 0)
+    session_output = state.get("sessionOutputTokens", 0)
+    session_cost = round(state.get("sessionInputCost", 0) + state.get("sessionOutputCost", 0), 5)
+    if session_input > 0 or session_output > 0:
+        cost_map[today] = {
+            "inputTokens": session_input,
+            "outputTokens": session_output,
+            "totalCost": session_cost,
+        }
+
+    # Sort and slice
+    sorted_dates = sorted(cost_map.keys())
+    window = sorted_dates[-days:] if len(sorted_dates) > days else sorted_dates
+    daily = [{"date": d, **cost_map[d]} for d in window]
+
+    total_tokens = sum(d["inputTokens"] + d["outputTokens"] for d in daily)
+    total_cost = sum(d["totalCost"] for d in daily)
+
+    # Compute trade profits per $ of token spend
+    trades = state.get("tradeHistory", [])
+    # Calculate realized P&L over the same window
+    start_date = window[0] if window else None
+    realized_pnl = 0.0
+    for t in trades:
+        ts = t.get("timestamp", "")
+        entry_date = ts[:10] if ts else ""
+        if start_date and entry_date >= start_date:
+            realized_pnl += safe_float(t["pnl"])
+
+    roi_ratio = round(realized_pnl / total_cost, 2) if total_cost > 0 else 0
+
+    return jsonify({
+        "daily": daily,
+        "totalTokens": total_tokens,
+        "totalCost": round(total_cost, 5),
+        "windowRealizedPnL": round(realized_pnl, 2),
+        "tradeProfitPerTokenDollar": roi_ratio,
     })
 
 

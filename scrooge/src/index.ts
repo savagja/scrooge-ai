@@ -176,6 +176,17 @@ async function main(isRetry = false) {
         console.log("─".repeat(50) + "\n");
       }
       lastAgentOutput = "";
+
+      // Track token usage from the assistant message
+      const msg = event.message as any;
+      if (msg.usage && typeof msg.usage.input === "number") {
+        state.recordTokenUsage(
+          msg.usage.input,
+          msg.usage.output,
+          msg.usage.cost?.input ?? 0,
+          msg.usage.cost?.output ?? 0,
+        );
+      }
     }
     if (event.type === "tool_execution_start") {
       console.log(`   [TOOL] ${event.toolName}...`);

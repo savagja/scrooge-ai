@@ -184,6 +184,15 @@ export interface StrategyTool {
 // PERSISTED STATE (what goes into state.json)
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface DailyTokenCost {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  inputCost: number;
+  outputCost: number;
+  totalCost: number;
+}
+
 export interface PersistedState {
   cash: number;
   settledCash: number;
@@ -198,4 +207,9 @@ export interface PersistedState {
   halted: boolean;
   haltReason: string | null;
   preMarketBriefing: string | null;           // Overnight briefing built before market open
+  tokenCosts: DailyTokenCost[];               // Daily token usage & cost history
+  sessionInputTokens: number;                 // Current session running totals
+  sessionOutputTokens: number;
+  sessionInputCost: number;
+  sessionOutputCost: number;
 }

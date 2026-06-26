@@ -75,11 +75,34 @@ export class PortfolioState {
   private resetDailyIfNeeded() {
     const today = new Date().toISOString().slice(0, 10);
     if (this.state.today !== today) {
+      // Finalize previous day's token costs into history
+      if (this.state.sessionInputTokens > 0 || this.state.sessionOutputTokens > 0) {
+        this._finalizeDailyTokenCost();
+      }
       this.state.dailyPnL = 0;
       this.state.today = today;
+      this.state.sessionInputTokens = 0;
+      this.state.sessionOutputTokens = 0;
+      this.state.sessionInputCost = 0;
+      this.state.sessionOutputCost = 0;
       this.state.halted = false;
       this.state.haltReason = null;
       this.save();
+    }
+  }
+
+  private _finalizeDailyTokenCost() {
+    const entry: DailyTokenCost = {
+      date: this.state.today,
+      inputTokens: this.state.sessionInputTokens,
+      outputTokens: this.state.sessionOutputTokens,
+      inputCost: Math.round(this.state.sessionInputCost * 100000) / 100000,
+      outputCost: Math.round(this.state.sessionOutputCost * 100000) / 100000,
+      totalCost: Math.round((this.state.sessionInputCost + this.state.sessionOutputCost) * 100000) / 100000,
+    };
+    this.state.tokenCosts.push(entry);
+    if (this.state.tokenCosts.length > 365) {
+      this.state.tokenCosts = this.state.tokenCosts.slice(-365);
     }
   }
 
@@ -621,6 +644,60 @@ export class PortfolioState {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // TOKEN COST TRACKING
+  // ═══════════════════════════════════════════════════════════════════════
+
+  recordTokenUsage(inputTokens: number, outputTokens: number, inputCost: number, outputCost: number) {
+    this.state.sessionInputTokens += inputTokens;
+    this.state.sessionOutputTokens += outputTokens;
+    this.state.sessionInputCost += inputCost;
+    this.state.sessionOutputCost += outputCost;
+    this.save();
+  }
+
+  getSessionTokenTotals() {
+    return {
+      inputTokens: this.state.sessionInputTokens,
+      outputTokens: this.state.sessionOutputTokens,
+      inputCost: Math.round(this.state.sessionInputCost * 100000) / 100000,
+      outputCost: Math.round(this.state.sessionOutputCost * 100000) / 100000,
+      totalCost: Math.round((this.state.sessionInputCost + this.state.sessionOutputCost) * 100000) / 100000,
+    };
+  }
+
+  getDailyTokenCost(date?: string): DailyTokenCost | null {
+    const target = date ?? new Date().toISOString().slice(0, 10);
+    const entry = this.state.tokenCosts.find(c => c.date === target);
+    if (entry) return entry;
+    // If it's today and not finalized yet, return current session
+    if (target === this.state.today) {
+      return {
+        date: target,
+        inputTokens: this.state.sessionInputTokens,
+        outputTokens: this.state.sessionOutputTokens,
+        inputCost: Math.round(this.state.sessionInputCost * 100000) / 100000,
+        outputCost: Math.round(this.state.sessionOutputCost * 100000) / 100000,
+        totalCost: Math.round((this.state.sessionInputCost + this.state.sessionOutputCost) * 100000) / 100000,
+      };
+    }
+    return null;
+  }
+
+  getTokenCostHistory(days?: number): DailyTokenCost[] {
+    const result = [...this.state.tokenCosts];
+    // Include current session as a provisional entry
+    const todayEntry = this.getDailyTokenCost();
+    if (todayEntry && !result.find(c => c.date === todayEntry.date)) {
+      result.push(todayEntry);
+    }
+    result.sort((a, b) => a.date.localeCompare(b.date));
+    if (days && days < result.length) {
+      return result.slice(-days);
+    }
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // EXPORT — For dashboards
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -634,6 +711,11 @@ export class PortfolioState {
       settledCash: this.state.settledCash,
       dailyPnL: this.state.dailyPnL,
       lessons: this.state.memory.lessons,
+      sessionTokens: {
+        inputTokens: this.state.sessionInputTokens,
+        outputTokens: this.state.sessionOutputTokens,
+        totalCost: Math.round((this.state.sessionInputCost + this.state.sessionOutputCost) * 100000) / 100000,
+      },
     };
   }
 }
