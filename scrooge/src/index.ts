@@ -22,6 +22,7 @@ import { PortfolioState } from "./state/portfolio.js";
 import { getAccount, getOpenPositions, getClock } from "./execution/alpaca.js";
 import { getVix, getSpyChange } from "./ingestion/market.js";
 import { buildMarketContext, formatContextForPrompt, buildPreMarketBriefing, resetContextHistory } from "./context/builder.js";
+import { runDailyRetrospective } from "./retrospective/retrospective.js";
 import type { MarketState } from "./types.js";
 
 // ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -286,6 +287,22 @@ async function main(isRetry = false) {
   } catch (err) {
     console.error("\n💥 Fatal error:", err);
   } finally {
+    // ── MARKET CLOSE: Run daily retrospective ────────────────────────────
+    // We reach here if the event loop exits (market closed, error, or process signal).
+    // Check if we've already generated today's report to avoid double-run.
+    const today = new Date().toISOString().slice(0, 10);
+    const latestReport = state.getLatestReport();
+    if (!latestReport || latestReport.date !== today) {
+      console.log("\n📋 Market session ended — running daily retrospective...");
+      try {
+        await runDailyRetrospective(state);
+      } catch (e: any) {
+        console.error("❌ Retrospective failed:", e.message);
+      }
+    } else {
+      console.log(`\n📋 Report already generated for ${today} — skipping.`);
+    }
+
     session.dispose();
   }
 }

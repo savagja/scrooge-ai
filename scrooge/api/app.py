@@ -311,6 +311,61 @@ def token_stats():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  GET /api/daily-report
+#  Latest daily retrospective report (markdown + structured data).
+#  If your assistant calls this, it gets the report to message you.
+# ─────────────────────────────────────────────────────────────────────────
+@app.route("/api/daily-report")
+def daily_report():
+    state = load_state()
+    if isinstance(state, tuple):
+        return jsonify(state[0]), state[1]
+
+    reports = state.get("dailyReports", [])
+    if not reports:
+        return jsonify({
+            "exists": False,
+            "message": "No daily retrospective report available yet.",
+        })
+
+    # Latest report (most recent date)
+    latest = max(reports, key=lambda r: r["date"])
+
+    date_param = request.args.get("date")
+    if date_param:
+        target = next((r for r in reports if r["date"] == date_param), None)
+        if not target:
+            return jsonify({
+                "exists": False,
+                "message": f"No report found for {date_param}.",
+            })
+        latest = target
+
+    return jsonify({
+        "exists": True,
+        "date": latest["date"],
+        "timestamp": latest.get("timestamp", ""),
+        "summary": {
+            "tradeCount": latest.get("tradeCount", 0),
+            "startingEquity": safe_float(latest.get("startingEquity", 0)),
+            "endingEquity": safe_float(latest.get("endingEquity", 0)),
+            "totalEquityChange": safe_float(latest.get("totalEquityChange", 0)),
+            "netPnL": safe_float(latest.get("netPnL", 0)),
+            "winCount": latest.get("winCount", 0),
+            "lossCount": latest.get("lossCount", 0),
+            "winRate": latest.get("winRate", 0),
+            "tokenCost": safe_float(latest.get("tokenCost", 0)),
+        },
+        "prose": {
+            "whatWorked": latest.get("whatWorked", ""),
+            "whatDidnt": latest.get("whatDidnt", ""),
+            "whatToChange": latest.get("whatToChange", ""),
+        },
+        "markdown": latest.get("markdown", ""),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  GET /api/health
 #  Health check.
 # ─────────────────────────────────────────────────────────────────────────

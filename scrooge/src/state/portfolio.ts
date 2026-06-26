@@ -14,6 +14,8 @@ import type {
   StrategyCalibration,
   VectorMemoryEntry,
   PersistedState,
+  DailyTokenCost,
+  DailyReport,
 } from "../types.js";
 
 const DATA_DIR = join(process.cwd(), "data");
@@ -62,6 +64,12 @@ export class PortfolioState {
       halted: false,
       haltReason: null,
       preMarketBriefing: null,
+      tokenCosts: [],
+      sessionInputTokens: 0,
+      sessionOutputTokens: 0,
+      sessionInputCost: 0,
+      sessionOutputCost: 0,
+      dailyReports: [],
     };
   }
 
@@ -70,6 +78,12 @@ export class PortfolioState {
     if (!this.state.portfolioHistory) this.state.portfolioHistory = [];
     if (!this.state.calibrationTable) this.state.calibrationTable = [];
     if (!this.state.vectorMemory) this.state.vectorMemory = [];
+    if (!this.state.dailyReports) this.state.dailyReports = [];
+    if (!this.state.tokenCosts) this.state.tokenCosts = [];
+    if (this.state.sessionInputTokens === undefined) this.state.sessionInputTokens = 0;
+    if (this.state.sessionOutputTokens === undefined) this.state.sessionOutputTokens = 0;
+    if (this.state.sessionInputCost === undefined) this.state.sessionInputCost = 0;
+    if (this.state.sessionOutputCost === undefined) this.state.sessionOutputCost = 0;
   }
 
   private resetDailyIfNeeded() {
@@ -695,6 +709,43 @@ export class PortfolioState {
       return result.slice(-days);
     }
     return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DAILY RETROSPECTIVE REPORTS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Get all trades that were executed on a specific date. */
+  getTradesForDay(date: string): TradeRecord[] {
+    return this.state.tradeHistory.filter((t) => t.timestamp.slice(0, 10) === date);
+  }
+
+  /** Get portfolio snapshots for a specific date. */
+  getSnapshotsForDay(date: string): PortfolioSnapshot[] {
+    return this.state.portfolioHistory.filter((s) => s.timestamp.slice(0, 10) === date);
+  }
+
+  /** Save a daily retrospective report. */
+  saveDailyReport(report: DailyReport) {
+    // Replace existing report for the same date, or append
+    const idx = this.state.dailyReports.findIndex((r) => r.date === report.date);
+    if (idx >= 0) {
+      this.state.dailyReports[idx] = report;
+    } else {
+      this.state.dailyReports.push(report);
+    }
+    // Keep max 90 reports (3 months of daily)
+    if (this.state.dailyReports.length > 90) {
+      this.state.dailyReports = this.state.dailyReports.slice(-60);
+    }
+    this.save();
+  }
+
+  /** Get the latest daily retrospective report (most recent date). */
+  getLatestReport(): DailyReport | null {
+    if (this.state.dailyReports.length === 0) return null;
+    const sorted = [...this.state.dailyReports].sort((a, b) => a.date.localeCompare(b.date));
+    return sorted[sorted.length - 1];
   }
 
   // ═══════════════════════════════════════════════════════════════════════

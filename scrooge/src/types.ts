@@ -193,6 +193,34 @@ export interface DailyTokenCost {
   totalCost: number;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DAILY RETROSPECTIVE REPORT
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface DailyReport {
+  date: string;
+  timestamp: string;
+  tradeCount: number;
+  totalEquityChange: number;
+  startingEquity: number;
+  endingEquity: number;
+  cashAtEnd: number;
+  settledCashAtEnd: number;
+  winCount: number;
+  lossCount: number;
+  winRate: number;
+  grossPnL: number;
+  tokenCost: number;
+  netPnL: number;
+  positionsHeldAtClose: number;
+  /** LLM-written prose sections */
+  whatWorked: string;
+  whatDidnt: string;
+  whatToChange: string;
+  /** Complete markdown report */
+  markdown: string;
+}
+
 export interface PersistedState {
   cash: number;
   settledCash: number;
@@ -212,4 +240,5 @@ export interface PersistedState {
   sessionOutputTokens: number;
   sessionInputCost: number;
   sessionOutputCost: number;
+  dailyReports: DailyReport[];                // Daily retrospective reports
 }
