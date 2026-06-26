@@ -1,0 +1,70 @@
+# ════════════════════════════════════════════════════════════
+# TRADING CONFIGURATION
+# Adjust these values to tune strategy, risk, and behavior.
+# No secrets here — all API keys live in .env
+# ════════════════════════════════════════════════════════════
+
+# ─── Account ─────────────────────────────────────────────────
+initial_capital: 100          # Starting account size (for reference only)
+
+# ─── Strategy Parameters ─────────────────────────────────────
+poll_interval_ms: 120000       # Every 2 minutes — save tokens, context doesn't change meaningfully in 30s
+watchlist:                    # Seed watchlist — bot will discover more dynamically
+  - AAPL
+  - TSLA
+  - NVDA
+  - AMD
+  - MSFT
+  - AMZN
+  - GOOGL
+  - META
+  - NFLX
+  - CRM
+  - PLTR
+  - COIN
+  - HOOD
+  - SOFI
+  - ENPH
+  - FSLR
+
+discovery:
+  enabled: true               # Allow bot to discover tickers outside watchlist
+  max_discovered: 10          # How many extra tickers to add dynamically
+  refresh_interval_cycles: 3  # Re-discover every N cycles
+
+# ─── Risk Parameters ──────────────────────────────────────────
+risk:
+  max_position_pct: 0.30        # Max % of account per trade (0.30 = 30%)
+  max_daily_loss_pct: 0.15      # Halt trading after losing this % of account
+  stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry
+  trailing_stop_pct: 0.05       # For winners: exit if price drops 5% from peak
+  green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop
+  cooldown_minutes: 3           # Minimum minutes between trades on same ticker
+  consecutive_losses_halt: 4    # Halt after this many consecutive losses
+  max_open_positions: 4         # Max positions held simultaneously
+
+# ─── Signal Filters ───────────────────────────────────────────
+signal:
+  min_impact_score: 4           # Lowered from 6 — the LLM analysis model is already skeptical; 4 is a reasonable action threshold
+  min_confidence: 0.45          # Lowered from 0.60 — double-skepticism trap reduced
+  hold_minutes: 30              # Initial time stop: 30 min to prove itself
+
+# ─── Execution ────────────────────────────────────────────────
+execution:
+  dry_run: true                 # Set to false for live/paper trading. Keep true for first deploy test.
+  fractional_enabled: true    # Alpaca fractional shares (must stay true for small account)
+  default_time_in_force: day    # day, ioc, fok
+
+# ─── Data Sources ─────────────────────────────────────────────
+data:
+  edgar_enabled: true           # SEC EDGAR 8-K filings
+  reddit_enabled: true          # Reddit mention velocity
+  yahoo_discovery: true         # Yahoo Finance market movers for discovery
+  volume_lookback_days: 20     # Days for relative volume calculation
+  range_lookback_days: 20      # Days for range break calculation
+
+# ─── LLM / Agent ─────────────────────────────────────────────
+agent:
+  thinking_level: medium      # off, minimal, low, medium, high, xhigh
+  max_tool_calls_per_turn: 6   # Reduced from 12 — agent gets pre-digested context now, needs fewer calls
+  enable_reflection: false       # Disabled — saves tokens. Manual reflect_on_performance still available

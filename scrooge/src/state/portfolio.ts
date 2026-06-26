@@ -1,0 +1,639 @@
+/**
+ * Portfolio state manager.
+ * Full persistence for trades, snapshots, calibration, and vector memory.
+ * Designed for dashboard rendering and machine learning.
+ */
+
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
+import type {
+  Position,
+  TradeRecord,
+  AgentMemory,
+  PortfolioSnapshot,
+  StrategyCalibration,
+  VectorMemoryEntry,
+  PersistedState,
+} from "../types.js";
+
+const DATA_DIR = join(process.cwd(), "data");
+const STATE_FILE = join(DATA_DIR, "state.json");
+
+export class PortfolioState {
+  private state: PersistedState;
+  private filePath: string;
+
+  constructor(initialCapital = 100) {
+    this.filePath = STATE_FILE;
+    mkdirSync(dirname(this.filePath), { recursive: true });
+
+    if (existsSync(this.filePath)) {
+      try {
+        const raw = readFileSync(this.filePath, "utf-8");
+        this.state = JSON.parse(raw) as PersistedState;
+      } catch {
+        this.state = this.defaultState(initialCapital);
+      }
+    } else {
+      this.state = this.defaultState(initialCapital);
+    }
+
+    this.resetDailyIfNeeded();
+    this._ensureFields(); // Backwards compat for loaded state
+  }
+
+  private defaultState(capital: number): PersistedState {
+    return {
+      cash: capital,
+      settledCash: capital,
+      dailyPnL: 0,
+      today: new Date().toISOString().slice(0, 10),
+      positions: [],
+      tradeHistory: [],
+      portfolioHistory: [],
+      calibrationTable: [],
+      vectorMemory: [],
+      memory: {
+        lessons: [],
+        strategyPerformance: {},
+        lastReflection: null,
+        contextNotes: [],
+      },
+      halted: false,
+      haltReason: null,
+      preMarketBriefing: null,
+    };
+  }
+
+  /** Ensure missing fields exist (backwards compat). */
+  private _ensureFields() {
+    if (!this.state.portfolioHistory) this.state.portfolioHistory = [];
+    if (!this.state.calibrationTable) this.state.calibrationTable = [];
+    if (!this.state.vectorMemory) this.state.vectorMemory = [];
+  }
+
+  private resetDailyIfNeeded() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.state.today !== today) {
+      this.state.dailyPnL = 0;
+      this.state.today = today;
+      this.state.halted = false;
+      this.state.haltReason = null;
+      this.save();
+    }
+  }
+
+  private save() {
+    writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // GETTERS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  getCash(): number { return this.state.cash; }
+  getSettledCash(): number { return this.state.settledCash; }
+  getDailyPnL(): number { return this.state.dailyPnL; }
+  getPositions(): Position[] { return this.state.positions; }
+  getTradeHistory(): TradeRecord[] { return this.state.tradeHistory; }
+  getPortfolioHistory(): PortfolioSnapshot[] { return this.state.portfolioHistory; }
+  getCalibrationTable(): StrategyCalibration[] { return this.state.calibrationTable; }
+  getVectorMemory(): VectorMemoryEntry[] { return this.state.vectorMemory; }
+  getMemory(): AgentMemory { return this.state.memory; }
+  isHalted(): { halted: boolean; reason: string | null } {
+    return { halted: this.state.halted, reason: this.state.haltReason };
+  }
+
+  getPortfolio() {
+    return {
+      positions: this.state.positions,
+      cash: this.state.cash,
+      settledCash: this.state.settledCash,
+      dailyPnL: this.state.dailyPnL,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // SETTERS — Account sync
+  // ═══════════════════════════════════════════════════════════════════════
+
+  updateSettledCash(amount: number) {
+    this.state.settledCash = Math.round(amount * 100) / 100;
+    this.save();
+  }
+
+  syncAccount(cash: number, settledCash: number) {
+    this.state.cash = Math.round(cash * 100) / 100;
+    this.state.settledCash = Math.round(settledCash * 100) / 100;
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // SNAPSHOT — Equity curve data for dashboards
+  // ═══════════════════════════════════════════════════════════════════════
+
+  addSnapshot(vix: number | null, regime: string) {
+    const unrealized = this.state.positions.reduce(
+      (sum, p) => sum + (p.unrealizedPnL || 0),
+      0
+    );
+    const openNotional = this.state.positions.reduce(
+      (sum, p) => sum + p.notional,
+      0
+    );
+
+    const snap: PortfolioSnapshot = {
+      timestamp: new Date().toISOString(),
+      totalEquity: Math.round((this.state.cash + openNotional + unrealized) * 100) / 100,
+      cash: this.state.cash,
+      settledCash: this.state.settledCash,
+      positionsCount: this.state.positions.length,
+      openNotional,
+      dailyPnL: this.state.dailyPnL,
+      unrealizedPnL: Math.round(unrealized * 100) / 100,
+      vix,
+      regime,
+    };
+
+    this.state.portfolioHistory.push(snap);
+    // Keep last 10,000 snapshots (~1 week at 30s polling)
+    if (this.state.portfolioHistory.length > 10000) {
+      this.state.portfolioHistory = this.state.portfolioHistory.slice(-8000);
+    }
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ENTRY — Record new position
+  // ═══════════════════════════════════════════════════════════════════════
+
+  recordEntry(
+    symbol: string,
+    qty: number,
+    price: number,
+    notional: number,
+    holdUntil: Date,
+    strategy: string,
+    marketContext?: {
+      vix: number | null;
+      spyChange: number | null;
+      regime: string;
+    },
+    signalMeta?: {
+      source: string;
+      confidence: number;
+      impactScore: number;
+    }
+  ) {
+    const pos: Position = {
+      symbol,
+      qty: Math.round(qty * 1000000) / 1000000,
+      entryPrice: Math.round(price * 100) / 100,
+      entryTime: new Date().toISOString(),
+      holdUntil: holdUntil.toISOString(),
+      notional: Math.round(notional * 100) / 100,
+      unrealizedPnL: 0,
+      strategy,
+      trailingStopPrice: null,
+      highestPrice: price,
+      status: "initial",
+      entryVix: marketContext?.vix ?? null,
+      entrySpyChange: marketContext?.spyChange ?? null,
+      entryRegime: marketContext?.regime ?? "unknown",
+      entrySignalConfidence: signalMeta?.confidence ?? 0.5,
+      entrySignalImpactScore: signalMeta?.impactScore ?? 0,
+      entrySignalSource: signalMeta?.source ?? strategy,
+    };
+    this.state.positions.push(pos);
+    this.state.cash = Math.round((this.state.cash - notional) * 100) / 100;
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // EXIT — Record completed trade, update calibration, vector memory
+  // ═══════════════════════════════════════════════════════════════════════
+
+  recordExit(
+    symbol: string,
+    exitPrice: number,
+    exitReason: string,
+    agentReasoning?: string
+  ) {
+    const idx = this.state.positions.findIndex((p) => p.symbol === symbol);
+    if (idx === -1) return;
+
+    const pos = this.state.positions[idx];
+    const proceeds = pos.qty * exitPrice;
+    const pnl = Math.round((proceeds - pos.notional) * 100) / 100;
+    const pnlPct = Math.round((pnl / pos.notional) * 10000) / 100;
+
+    const holdMin =
+      (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
+
+    // Compute timeToGreen
+    let timeToGreen: number | null = null;
+    if (pos.status !== "initial") {
+      timeToGreen = Math.round(holdMin * 0.6);
+    }
+
+    // Build feature vector using entry context stored in position
+    const featureVector = [
+      Math.min((pos.entryVix ?? 18) / 50, 1.0),
+      Math.min(Math.max(pos.entrySignalConfidence, 0), 1),
+      Math.min(Math.max(pos.entrySignalImpactScore / 10, -1), 1),
+      Math.min(pos.notional / 100, 1.0),
+      pos.entryRegime === "trending_up" ? 1 : 0,
+      pos.entryRegime === "chop" ? 1 : 0,
+      pos.entryRegime === "volatile" ? 1 : 0,
+    ];
+
+    const trade: TradeRecord = {
+      id: `${symbol}-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      symbol: pos.symbol,
+      strategy: pos.strategy,
+      direction: "long",
+      entryPrice: pos.entryPrice,
+      exitPrice: Math.round(exitPrice * 100) / 100,
+      qty: pos.qty,
+      notional: pos.notional,
+      pnl,
+      pnlPct,
+      exitReason,
+      holdMinutesActual: Math.round(holdMin * 10) / 10,
+      wasPromoted: pos.status !== "initial",
+      timeToGreen,
+      vixAtEntry: pos.entryVix,
+      spyChangeAtEntry: pos.entrySpyChange,
+      marketRegimeAtEntry: pos.entryRegime,
+      signalSource: pos.entrySignalSource,
+      signalConfidence: pos.entrySignalConfidence,
+      signalImpactScore: pos.entrySignalImpactScore,
+      agentReasoning: agentReasoning ?? "",
+      featureVector,
+    };
+
+    this.state.tradeHistory.push(trade);
+    this.state.cash = Math.round((this.state.cash + proceeds) * 100) / 100;
+    this.state.dailyPnL = Math.round((this.state.dailyPnL + pnl) * 100) / 100;
+    this.state.positions.splice(idx, 1);
+
+    // Update strategy stats
+    this._updateStrategyStats(pos.strategy, pnl);
+
+    // Update calibration table
+    this._updateCalibration(
+      pos.strategy,
+      pos.entryRegime,
+      pnl,
+      holdMin,
+      pos.status !== "initial"
+    );
+
+    // Add to vector memory
+    this._addVectorMemory(trade);
+
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // POSITION STATE — Promotions, trailing stop, P&L
+  // ═══════════════════════════════════════════════════════════════════════
+
+  updatePositionState(
+    symbol: string,
+    currentPrice: number,
+    updates: {
+      status?: Position["status"];
+      trailingStopPrice?: number | null;
+      highestPrice?: number;
+    }
+  ) {
+    const pos = this.state.positions.find((p) => p.symbol === symbol);
+    if (!pos) return;
+
+    if (updates.status) pos.status = updates.status;
+    if (updates.trailingStopPrice !== undefined)
+      pos.trailingStopPrice = updates.trailingStopPrice;
+    if (updates.highestPrice)
+      pos.highestPrice = Math.max(pos.highestPrice, updates.highestPrice);
+
+    const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
+    pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    this.save();
+  }
+
+  updatePositionPnL(symbol: string, currentPrice: number) {
+    const pos = this.state.positions.find((p) => p.symbol === symbol);
+    if (!pos) return;
+    const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
+    pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // STRATEGY STATS (Traditional)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private _updateStrategyStats(strategy: string, pnl: number) {
+    if (!this.state.memory.strategyPerformance[strategy]) {
+      this.state.memory.strategyPerformance[strategy] = {
+        wins: 0,
+        losses: 0,
+        avgWin: 0,
+        avgLoss: 0,
+        winRate: 0,
+      };
+    }
+    const s = this.state.memory.strategyPerformance[strategy];
+    if (pnl > 0) {
+      s.wins++;
+      s.avgWin = Math.round(((s.avgWin * (s.wins - 1)) + pnl) / s.wins * 100) / 100;
+    } else {
+      s.losses++;
+      s.avgLoss = Math.round(((s.avgLoss * (s.losses - 1)) + pnl) / s.losses * 100) / 100;
+    }
+    s.winRate = Math.round((s.wins / (s.wins + s.losses)) * 100) / 100;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CALIBRATION TABLE — Phase 2: Data-driven confidence
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private _updateCalibration(
+    strategy: string,
+    regime: string,
+    pnl: number,
+    holdMin: number,
+    wasPromoted: boolean
+  ) {
+    let row = this.state.calibrationTable.find(
+      (c) => c.strategy === strategy && c.regime === regime
+    );
+    if (!row) {
+      row = {
+        strategy,
+        regime,
+        wins: 0,
+        losses: 0,
+        avgWinPct: 0,
+        avgLossPct: 0,
+        winRate: 0,
+        avgTimeToGreen: null,
+        totalTrades: 0,
+        lastUpdated: new Date().toISOString(),
+      };
+      this.state.calibrationTable.push(row);
+    }
+
+    row.totalTrades++;
+    if (pnl > 0) {
+      row.wins++;
+      row.avgWinPct =
+        Math.round(((row.avgWinPct * (row.wins - 1)) + (pnl / row.totalTrades)) / row.wins * 10000) /
+        10000;
+    } else {
+      row.losses++;
+      row.avgLossPct =
+        Math.round(((row.avgLossPct * (row.losses - 1)) + (pnl / row.totalTrades)) / row.losses * 10000) /
+        10000;
+    }
+    row.winRate = Math.round((row.wins / row.totalTrades) * 100) / 100;
+
+    if (wasPromoted) {
+      const prev = row.avgTimeToGreen ?? holdMin;
+      row.avgTimeToGreen = Math.round(((prev * (row.wins + row.losses - 1)) + holdMin) / (row.wins + row.losses));
+    }
+
+    row.lastUpdated = new Date().toISOString();
+  }
+
+  /** Get calibrated confidence override if enough data exists. */
+  getCalibratedConfidence(strategy: string, regime: string): {
+    override: number | null;
+    sampleSize: number;
+  } {
+    const row = this.state.calibrationTable.find(
+      (c) => c.strategy === strategy && c.regime === regime
+    );
+    if (!row || row.totalTrades < 5) {
+      return { override: null, sampleSize: row?.totalTrades ?? 0 };
+    }
+    return { override: row.winRate, sampleSize: row.totalTrades };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // VECTOR MEMORY — Phase 3: Similarity search
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private _addVectorMemory(trade: TradeRecord) {
+    const entry: VectorMemoryEntry = {
+      tradeId: trade.id,
+      symbol: trade.symbol,
+      featureVector: trade.featureVector,
+      outcome: trade.pnl > 0 ? "win" : "loss",
+      pnlPct: trade.pnlPct,
+      timestamp: trade.timestamp,
+    };
+    this.state.vectorMemory.push(entry);
+    // Keep last 500 for performance
+    if (this.state.vectorMemory.length > 500) {
+      this.state.vectorMemory = this.state.vectorMemory.slice(-400);
+    }
+  }
+
+  /** Find most similar past trades by cosine similarity. */
+  findSimilarTrades(featureVector: number[], topK: number = 5): (VectorMemoryEntry & { similarity: number })[] {
+    const scored = this.state.vectorMemory.map((vm) => ({
+      ...vm,
+      similarity: this._cosineSimilarity(featureVector, vm.featureVector),
+    }));
+    scored.sort((a, b) => b.similarity - a.similarity);
+    return scored.slice(0, topK);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FEATURE VECTOR — Normalize trade conditions for ML
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private _buildFeatureVector(
+    marketCtx: { vix: number | null; regime: string } | undefined,
+    pos: Position,
+    signalMeta: { confidence: number; impactScore: number } | undefined
+  ): number[] {
+    // Normalized features:
+    // 0: VIX / 50 (capped at 1.0)
+    // 1: confidence
+    // 2: impactScore / 10
+    // 3: position size / 100
+    // 4: isTrendingUp (1/0)
+    // 5: isChop (1/0)
+    // 6: isVolatile (1/0)
+    const vixNorm = Math.min((marketCtx?.vix ?? 18) / 50, 1.0);
+    const conf = Math.min(Math.max(signalMeta?.confidence ?? 0.5, 0), 1);
+    const impact = Math.min(Math.max((signalMeta?.impactScore ?? 0) / 10, -1), 1);
+    const size = Math.min(pos.notional / 100, 1.0);
+    const regime = marketCtx?.regime ?? "unknown";
+
+    return [
+      vixNorm,
+      conf,
+      impact,
+      size,
+      regime === "trending_up" ? 1 : 0,
+      regime === "chop" ? 1 : 0,
+      regime === "volatile" ? 1 : 0,
+    ];
+  }
+
+  private _cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0;
+    let magA = 0;
+    let magB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      magA += a[i] * a[i];
+      magB += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(magA) * Math.sqrt(magB) + 1e-10);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // HALT / LESSONS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  halt(reason: string) {
+    this.state.halted = true;
+    this.state.haltReason = reason;
+    this.save();
+  }
+
+  addLesson(lesson: string) {
+    this.state.memory.lessons.push(lesson);
+    if (this.state.memory.lessons.length > 100) {
+      this.state.memory.lessons = this.state.memory.lessons.slice(-50);
+    }
+    this.state.memory.lastReflection = new Date().toISOString();
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PRE-MARKET BRIEFING — Overnight data for market open
+  // ═══════════════════════════════════════════════════════════════════════
+
+  getPreMarketBriefing(): string | null {
+    return this.state.preMarketBriefing ?? null;
+  }
+
+  setPreMarketBriefing(briefing: string) {
+    this.state.preMarketBriefing = briefing;
+    this.save();
+  }
+
+  clearPreMarketBriefing() {
+    this.state.preMarketBriefing = null;
+    this.save();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CONTEXT NOTES — Agent-curated persistent awareness
+  // ═══════════════════════════════════════════════════════════════════════
+
+  getContextNotes(): Array<{
+    id: string;
+    ticker?: string;
+    topic: string;
+    note: string;
+    createdAt: string;
+    lastSeen: string;
+    cycleCount: number;
+  }> {
+    return this.state.memory.contextNotes || [];
+  }
+
+  addContextNote(note: {
+    id: string;
+    ticker?: string;
+    topic: string;
+    note: string;
+    createdAt: string;
+    lastSeen: string;
+    cycleCount: number;
+  }) {
+    // If a note with same ticker+topic exists, update it instead (dedup)
+    const existingIdx = this.state.memory.contextNotes.findIndex(
+      (n) => n.ticker === note.ticker && n.topic === note.topic
+    );
+    if (existingIdx >= 0) {
+      this.state.memory.contextNotes[existingIdx].note = note.note;
+      this.state.memory.contextNotes[existingIdx].lastSeen = note.lastSeen;
+      this.state.memory.contextNotes[existingIdx].cycleCount++;
+    } else {
+      this.state.memory.contextNotes.push(note);
+    }
+    // Keep max 50 notes
+    if (this.state.memory.contextNotes.length > 50) {
+      this.state.memory.contextNotes = this.state.memory.contextNotes.slice(-40);
+    }
+    this.save();
+  }
+
+  removeContextNotes(ids: string[]) {
+    const idSet = new Set(ids);
+    this.state.memory.contextNotes = this.state.memory.contextNotes.filter((n) => !idSet.has(n.id));
+    this.save();
+  }
+
+  /** Remove notes not touched in N minutes. Returns count removed. */
+  pruneStaleContextNotes(maxAgeMinutes: number): number {
+    const cutoff = Date.now() - maxAgeMinutes * 60000;
+    const before = this.state.memory.contextNotes.length;
+    this.state.memory.contextNotes = this.state.memory.contextNotes.filter(
+      (n) => new Date(n.lastSeen).getTime() > cutoff
+    );
+    const removed = before - this.state.memory.contextNotes.length;
+    if (removed > 0) this.save();
+    return removed;
+  }
+
+  /** Touch a note's lastSeen (called each cycle for notes the agent references). */
+  touchContextNote(id: string) {
+    const note = this.state.memory.contextNotes.find((n) => n.id === id);
+    if (note) {
+      note.lastSeen = new Date().toISOString();
+      note.cycleCount++;
+      this.save();
+    }
+  }
+
+  /** Get context notes formatted for the perception prompt (compact). */
+  formatContextNotesForPrompt(): string {
+    const notes = this.getContextNotes();
+    if (notes.length === 0) return "";
+
+    const lines = ["📋 ACTIVE CONTEXT NOTES:"];
+    for (const n of notes) {
+      const age = Math.round((Date.now() - new Date(n.createdAt).getTime()) / 60000);
+      const sinceLast = Math.round((Date.now() - new Date(n.lastSeen).getTime()) / 60000);
+      lines.push(`   [${n.topic}]${n.ticker ? ` ${n.ticker}` : ""} — ${n.note.slice(0, 120)} (${age}m old, ${sinceLast}m since update)`);
+    }
+    return lines.join("\n");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // EXPORT — For dashboards
+  // ═══════════════════════════════════════════════════════════════════════
+
+  exportForDashboard() {
+    return {
+      portfolioHistory: this.state.portfolioHistory,
+      tradeHistory: this.state.tradeHistory,
+      calibrationTable: this.state.calibrationTable,
+      positions: this.state.positions,
+      cash: this.state.cash,
+      settledCash: this.state.settledCash,
+      dailyPnL: this.state.dailyPnL,
+      lessons: this.state.memory.lessons,
+    };
+  }
+}

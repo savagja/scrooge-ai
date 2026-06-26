@@ -1,0 +1,17 @@
+[Unit]
+Description=Scrooge Dashboard API (Flask)
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/scrooge
+Environment=SCROOGE_STATE=/home/admin/scrooge/data/state.json
+Environment=SCROOGE_API_PORT=5000
+Environment=SCROOGE_API_HOST=0.0.0.0
+ExecStart=/home/admin/.local/bin/gunicorn -b 0.0.0.0:5000 --workers 2 --log-file /home/admin/scrooge/logs/api.log --error-logfile /home/admin/scrooge/logs/api-error.log api.app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
