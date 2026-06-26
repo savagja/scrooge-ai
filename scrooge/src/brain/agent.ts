@@ -26,11 +26,26 @@ export async function createTradingBrain(openRouterKey?: string) {
   // 2. Model Registry
   const modelRegistry = ModelRegistry.inMemory(authStorage);
 
-  // 3. Model Selection — use cheapest model, Gemini Flash 1.5 is fine
-  const modelId = process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat-v3-0724";
-  let model = modelRegistry.find("openrouter", modelId);
+  // 3. Model Selection — try configured model, then fall through known-good models
+  const knownModels = [
+    process.env.OPENROUTER_MODEL,
+    "google/gemini-2.5-flash-lite",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v3.2",
+    "google/gemini-2.5-flash",
+  ].filter(Boolean) as string[];
+
+  let model: ReturnType<typeof modelRegistry.find> = undefined;
+  for (const mid of knownModels) {
+    model = modelRegistry.find("openrouter", mid);
+    if (model) {
+      console.log(`🧠 Using model: ${mid}`);
+      break;
+    }
+  }
+
   if (!model) {
-    throw new Error(`Model ${modelId} not found in OpenRouter registry. Check the model name is correct.`);
+    throw new Error(`No valid model found in OpenRouter registry. Tried: ${knownModels.join(", ")}`);
   }
 
   // 4. Custom ResourceLoader (no discovery, fully explicit)
