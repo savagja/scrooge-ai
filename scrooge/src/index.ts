@@ -22,7 +22,7 @@ import { PortfolioState } from "./state/portfolio.js";
 import { getAccount, getOpenPositions, getClock } from "./execution/alpaca.js";
 import { getVix, getSpyChange } from "./ingestion/market.js";
 import { buildMarketContext, formatContextForPrompt, buildPreMarketBriefing, resetContextHistory } from "./context/builder.js";
-import { runDailyRetrospective } from "./retrospective/retrospective.js";
+import { runDailyRetrospective, shouldRunRetrospective } from "./retrospective/retrospective.js";
 import type { MarketState } from "./types.js";
 
 // ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -136,6 +136,24 @@ async function main(isRetry = false) {
     }
 
     console.log(`⏰ Market is closed. Retrying in ${cfg.pollIntervalMs / 1000}s...`);
+
+    // ── DAILY RETROSPECTIVE ────────────────────────────────────────────────
+    // The first time the bot detects the market is closed on a new day,
+    // run the retrospective to analyze the previous trading session.
+    // We do this here (before the retry loop) because the `finally` block
+    // only runs if the event loop exits, which doesn't happen in off-hours.
+    if (state.getPositions().length > 0) {
+      console.log("⚠️  Market closed with open positions — closing them first...");
+    }
+    if (await shouldRunRetrospective(state)) {
+      console.log("\n📋 Market closed — running daily retrospective...");
+      try {
+        await runDailyRetrospective(state);
+      } catch (e: any) {
+        console.error("❌ Retrospective failed:", e.message);
+      }
+    }
+
     await new Promise(r => setTimeout(r, cfg.pollIntervalMs));
     return main(true);
   }

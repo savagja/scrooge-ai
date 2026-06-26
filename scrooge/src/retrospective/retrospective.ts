@@ -16,6 +16,16 @@ import type { DailyReport } from "../types.js";
 import { analyzeDay } from "./analyzer.js";
 
 /**
+ * Check whether the retrospective should run for today.
+ * Returns true if no report exists for the current date yet.
+ */
+export async function shouldRunRetrospective(state: PortfolioState): Promise<boolean> {
+  const today = new Date().toISOString().slice(0, 10);
+  const latestReport = state.getLatestReport();
+  return !latestReport || latestReport.date !== today;
+}
+
+/**
  * Run the full-day retrospective.
  *
  * Call this at market close (or after the last cycle of the day).
