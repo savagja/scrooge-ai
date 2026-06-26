@@ -64,18 +64,35 @@ def overview():
     session_tokens = {
         "inputTokens": state.get("sessionInputTokens", 0),
         "outputTokens": state.get("sessionOutputTokens", 0),
-        "totalCost": round(state.get("sessionInputCost", 0) + state.get("sessionOutputCost", 0), 5),
+        "totalCost": round(
+            safe_float(state.get("sessionInputCost", 0)) + safe_float(state.get("sessionOutputCost", 0)),
+            5
+        ),
     }
 
-    # Today's daily P&L and token cost side by side
-    daily_pnl = safe_float(state["dailyPnL"])
+    # Today's daily change: current equity minus first snapshot of today
+    history = state.get("portfolioHistory", [])
+    today_snaps = [s for s in history if s.get("timestamp", "").startswith(today)]
+    first_today_equity = safe_float(today_snaps[0]["totalEquity"]) if today_snaps else safe_float(state["cash"])
+    daily_change = round(total_equity - first_today_equity, 2)
+
+    # Token costs
+    session_tokens = {
+        "inputTokens": state.get("sessionInputTokens", 0),
+        "outputTokens": state.get("sessionOutputTokens", 0),
+        "totalCost": round(
+            safe_float(state.get("sessionInputCost", 0)) + safe_float(state.get("sessionOutputCost", 0)),
+            5
+        ),
+    }
+
     daily_token_cost = session_tokens["totalCost"]
 
     return jsonify({
         "cash": safe_float(state["cash"]),
         "settledCash": settled,
         "totalEquity": round(total_equity, 2),
-        "dailyPnL": daily_pnl,
+        "dailyPnL": daily_change,
         "dailyTokenCost": daily_token_cost,
         "sessionTokens": session_tokens,
         "positionsCount": len(state.get("positions", [])),

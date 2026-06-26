@@ -15,7 +15,6 @@ echo "🔍 Validating local setup..."
 if [ ! -f "$LOCAL_DIR/.env" ]; then
     echo "❌ .env not found."
     echo "   cp .env.example .env"
-    echo "   # Then fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, OPENROUTER_API_KEY"
     exit 1
 fi
 
@@ -26,23 +25,39 @@ fi
 
 echo "   ✅ .env exists"
 
-# ─── 2. Rsync to Pi ─────────────────────────────
+# ─── 2. Create tarball (exclude data, logs, node_modules, etc.) ──────
 echo
-echo "📤 Syncing code to Pi..."
-rsync -avz --delete \
-    -e "ssh -i ~/.ssh/id_ed25519_pi -o StrictHostKeyChecking=accept-new" \
-    --exclude 'node_modules' \
-    --exclude 'data' \
-    --exclude 'logs' \
-    --exclude '.git' \
-    --exclude 'dist' \
-    --exclude 'deploy/' \
-    "$LOCAL_DIR/" \
-    "$REMOTE_HOST:$REMOTE_DIR/"
+echo "📦 Creating deploy tarball..."
+TARBALL="/tmp/scrooge-deploy-$(date +%s).tar.gz"
+tar czf "$TARBALL" \
+    --exclude=node_modules \
+    --exclude=data \
+    --exclude=logs \
+    --exclude=.git \
+    --exclude=dist \
+    --exclude=deploy \
+    -C "$LOCAL_DIR" \
+    .
+echo "   ✅ Tarball created ($(du -h "$TARBALL" | cut -f1))"
 
-echo "   ✅ Code synced"
+# ─── 3. Deploy to Pi ─────────────────────────────
+echo
+echo "📤 Deploying to Pi (preserving data/ and logs/)..."
 
-# ─── 3. Remote setup ────────────────────────────
+# Stop the bot service
+ssh -i ~/.ssh/id_ed25519_pi "$REMOTE_HOST" 'sudo systemctl stop scrooge 2>/dev/null; sudo systemctl reset-failed scrooge 2>/dev/null; echo "bot stopped"'
+
+# Push code — remove everything except data/ and logs/
+ssh -i ~/.ssh/id_ed25519_pi "$REMOTE_HOST" \
+    "cd $REMOTE_DIR && find . -maxdepth 1 ! -name '.' ! -name 'data' ! -name 'logs' -exec rm -rf {} + 2>/dev/null; echo 'cleaned (preserved data/ and logs/)'"
+
+# Extract new code
+cat "$TARBALL" | ssh -i ~/.ssh/id_ed25519_pi "$REMOTE_HOST" "cd $REMOTE_DIR && tar xzf - && echo 'code extracted'"
+
+# Clean up local tarball
+rm -f "$TARBALL"
+
+# ─── 4. Remote setup ────────────────────────────
 echo
 echo "🔧 Running remote setup..."
 
@@ -59,7 +74,7 @@ ssh -i ~/.ssh/id_ed25519_pi "$REMOTE_HOST" << 'REMOTE'
     echo "   🔒 Chmod .env..."
     chmod 600 .env 2>/dev/null || true
 
-    echo "   ⚙️  Installing systemd service..."
+    echo "   ⚙️  Ensuring systemd service..."
     sudo tee /etc/systemd/system/scrooge.service > /dev/null << 'EOF'
 [Unit]
 Description=Scrooge AI Trading Bot
@@ -91,7 +106,7 @@ EOF
     echo "   ✅ Setup complete. Service is ENABLED but NOT started."
 REMOTE
 
-# ─── 4. Deploy report ─────────────────────────────
+# ─── 5. Deploy report ─────────────────────────────
 echo
 echo "═══════════════════════════════════════════════════════"
 echo "  ✅ DEPLOYED to admin@192.168.50.42:/home/admin/scrooge"
@@ -99,22 +114,10 @@ echo "════════════════════════�
 echo
 echo "Next steps:"
 echo
-echo "  1. Test dry run (recommended):"
-echo "     ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42"
-echo "     cd /home/admin/scrooge"
-echo "     DRY_RUN=true npx tsx src/index.ts"
-echo
-echo "  2. Start for real (paper trading):"
+echo "  1. Start the bot:"
 echo "     ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42 'sudo systemctl start scrooge'"
 echo
-echo "  3. Watch logs:"
+echo "  2. Watch logs:"
 echo "     ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42 'sudo journalctl -u scrooge -f'"
-echo
-echo "  4. Stop anytime:"
-echo "     ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42 'sudo systemctl stop scrooge'"
-echo
-echo "  5. Edit config:"
-echo "     ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42 'nano /home/admin/scrooge/config.yaml'"
-echo "     # Then: ssh -i ~/.ssh/id_ed25519_pi admin@192.168.50.42 'sudo systemctl restart scrooge'"
 echo
 echo "═══════════════════════════════════════════════════════"
