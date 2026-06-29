@@ -36,9 +36,10 @@ discovery:
 risk:
   max_position_pct: 0.30        # Max % of account per trade (0.30 = 30%)
   max_daily_loss_pct: 0.15      # Halt trading after losing this % of account
-  stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry
-  trailing_stop_pct: 0.05       # For winners: exit if price drops 5% from peak
+  stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry (applies to both longs and shorts)
+  trailing_stop_pct: 0.05       # For winners: exit if price drops 5% from peak (longs) or rises 5% from trough (shorts)
   green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop
+  short_squeeze_threshold: 0.05 # For shorts: exit if price rises 5% intraday from entry (squeeze protection)
   cooldown_minutes: 3           # Minimum minutes between trades on same ticker
   consecutive_losses_halt: 4    # Halt after this many consecutive losses
   max_open_positions: 4         # Max positions held simultaneously

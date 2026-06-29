@@ -26,6 +26,7 @@ interface AppConfig {
     stopLossPct: number;
     trailingStopPct: number;
     greenThreshold: number;
+    shortSqueezeThreshold: number;
     cooldownMinutes: number;
     consecutiveLossesHalt: number;
     maxOpenPositions: number;
@@ -114,6 +115,7 @@ function loadConfig(): AppConfig {
       stopLossPct: num("STOP_LOSS_PCT", ["risk", "stop_loss_pct"], 0.03),
       trailingStopPct: num("TRAILING_STOP_PCT", ["risk", "trailing_stop_pct"], 0.05),
       greenThreshold: num("GREEN_THRESHOLD", ["risk", "green_threshold"], 0.01),
+      shortSqueezeThreshold: num("SHORT_SQUEEZE_THRESHOLD", ["risk", "short_squeeze_threshold"], 0.05),
       cooldownMinutes: num("COOLDOWN_MINUTES", ["risk", "cooldown_minutes"], 3),
       consecutiveLossesHalt: num("CONSECUTIVE_LOSSES_HALT", ["risk", "consecutive_losses_halt"], 4),
       maxOpenPositions: num("MAX_OPEN_POSITIONS", ["risk", "max_open_positions"], 4),

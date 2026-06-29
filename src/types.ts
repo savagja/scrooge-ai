@@ -27,7 +27,10 @@ export interface Position {
   strategy: string;
   trailingStopPrice: number | null;
   highestPrice: number;
+  lowestPrice: number;  // for shorts: track lowest price for trailing stop
   status: "initial" | "green" | "trailing";
+  /** "long" = bought, "short" = sold short (needs covering) */
+  direction: "long" | "short";
   // Entry context — captured at entry time for learning
   entryVix: number | null;
   entrySpyChange: number | null;
@@ -127,11 +130,40 @@ export interface VectorMemoryEntry {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MEMORY — Intelligent lesson learning
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A learned insight with weight and lifecycle tracking.
+ *  Lessons are NOT purely additive — the retrospective LLM merges,
+ *  modifies, overwrites, or removes them each cycle. */
+export interface Lesson {
+  id: string;
+  /** Short label: 'risk', 'strategy', 'timing', 'research', 'psychology', 'general' */
+  category: string;
+  /** The insight text */
+  insight: string;
+  /** How strongly the system holds this: 0.0 (just suggested) to 1.0 (repeatedly confirmed) */
+  weight: number;
+  /** Number of retrospective cycles that have reinforced this lesson */
+  reinforcementCount: number;
+  /** When this lesson was first created */
+  createdAt: string;
+  /** When this lesson was last confirmed/reinforced by the retrospective */
+  lastReinforcedAt: string;
+  /** If true, this lesson was contradicted by new evidence and should not be shown */
+  deprecated: boolean;
+  /** If set, the conditions under which this lesson applies (e.g. 'regime:volatile') */
+  context?: string;
+  /** Feature vector for similarity search against trade conditions */
+  featureVector: number[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // AGENT MEMORY
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface AgentMemory {
-  lessons: string[];
+  lessons: Lesson[];
   strategyPerformance: Record<string, {
     wins: number;
     losses: number;

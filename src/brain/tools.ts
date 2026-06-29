@@ -717,8 +717,9 @@ export const placeBuyOrderTool = defineTool({
   name: "place_buy_order",
   label: "Place Buy Order",
   description:
-    "Execute a buy order. Applies risk guardrails automatically. " +
+    "Execute a BUY order (long position). Applies risk guardrails automatically. " +
     "Only executes if trade passes: position limits, cash checks, daily loss halt. " +
+    "Use for LONG positions only. For short positions, use place_short_order. " +
     "Use AFTER analyzing a signal with trade_news_momentum or trade_mean_reversion.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker symbol to buy" }),
@@ -840,11 +841,175 @@ export const placeBuyOrderTool = defineTool({
 
 // ─── TOOL 14: place_sell_order ──────────────────────────────────────────────
 
+// ─── TOOL 13b: place_short_order ────────────────────────────────────────────
+
+export const placeShortOrderTool = defineTool({
+  name: "place_short_order",
+  label: "Place Short Order",
+  description:
+    "Execute a SHORT SALE (short position, requires Alpaca margin account). " +
+    "Applies risk guardrails automatically including squeeze protection. " +
+    "Only executes if trade passes: position limits, cash checks, daily loss halt. " +
+    "Use AFTER analyzing a bearish signal with trade_news_momentum or trade_mean_reversion. " +
+    "To close a short position, call place_sell_order.",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Ticker symbol to short sell" }),
+    notional: Type.Number({ description: "Dollar notional value of the short (e.g. 25). If omitted, uses risk-based sizing." }),
+    strategy: Type.String({ description: "Strategy name (news_momentum, mean_reversion, edgar_filings, etc.)" }),
+    holdMinutes: Type.Number({ default: 30, description: "Initial hold duration (30 min). Winners can extend via trailing stop." }),
+  }),
+  execute: async (_id, params) => {
+    const state = requireState();
+    const dryRun = process.env.DRY_RUN === "true";
+
+    const price = await getPrice(params.ticker ?? "");
+    if (!price) {
+      return {
+        content: [{ type: "text", text: `❌ No price data for ${params.ticker}.` }],
+        details: { executed: false, reason: "No price data" as string | null, memoryWarning: null } as any,
+      };
+    }
+
+    const signal = {
+      symbol: params.ticker ?? "",
+      direction: "short" as const,
+      impactScore: 7,
+      confidence: 0.7,
+      suggestedSizePct: params.notional ? params.notional / 100 : 0.20,
+      suggestedHoldMinutes: params.holdMinutes ?? 30,
+    };
+
+    const portfolio = state.getPortfolio();
+    const account = await getAccount();
+    state.syncAccount(account.cash, account.settledCash);
+
+    // Phase 2: Look up calibration for (strategy, current regime)
+    const [vix, spyChange] = await Promise.all([
+      getVix().catch(() => null),
+      getSpyChange().catch(() => null),
+    ]);
+    const regime = vix !== null && vix > 25 ? "volatile"
+      : spyChange !== null && spyChange > 0.5 ? "trending_up"
+        : spyChange !== null && spyChange < -0.5 ? "trending_down"
+          : "chop";
+
+    // ── MEMORY CONSULTATION ──────────────────────────────────────────
+    const memoryFeatureVector = state.buildLessonFeatureVector({
+      vix,
+      regime,
+      confidence: signal.confidence,
+      impactScore: signal.impactScore,
+      notional: params.notional || 25,
+    });
+    const relevantLessons = state.findRelevantLessons(memoryFeatureVector, 3);
+    const similarTrades = state.findSimilarTrades(memoryFeatureVector, 3);
+    let memoryWarning: string | null = null;
+    if (relevantLessons.length > 0) {
+      const highWeightLessons = relevantLessons.filter((l) => l.weight >= 0.7);
+      if (highWeightLessons.length > 0) {
+        memoryWarning = highWeightLessons.map((l) => `[${l.category}] ${l.insight.slice(0, 100)}`).join(" | ");
+      }
+    }
+    if (similarTrades.length > 0) {
+      const winRate = similarTrades.filter((t) => t.outcome === "win").length / similarTrades.length;
+      if (winRate < 0.34) {
+        memoryWarning = (memoryWarning ? memoryWarning + " | " : "") +
+          `WARNING: Only ${(winRate * 100).toFixed(0)}% of similar past short trades won.`;
+      }
+    }
+    if (memoryWarning) {
+      console.log(`[MEMORY] ${params.ticker} (short): ${memoryWarning}`);
+    }
+
+    const calibration = state.getCalibratedConfidence(params.strategy ?? "unknown", regime);
+    if (calibration.override !== null) {
+      console.log(`[CALIBRATION] ${params.ticker} (short): historical win rate ${calibration.override.toFixed(2)} (${calibration.sampleSize} samples) in ${regime}`);
+    }
+
+    const risk = evaluateBuySignal({
+      signal,
+      accountValue: account.equity,
+      cash: portfolio.cash,
+      settledCash: portfolio.settledCash,
+      dailyPnL: portfolio.dailyPnL,
+      openPositions: portfolio.positions,
+      currentRegime: regime,
+      calibrationOverride: calibration.override,
+    });
+
+    if (!risk.allowed) {
+      const memoryPrefix = memoryWarning ? `🧠 MEMORY: ${memoryWarning}\n\n` : "";
+      return {
+        content: [{ type: "text", text: `${memoryPrefix}⛔ RISK BLOCKED (short): ${risk.reason}\nNo order placed.` }],
+        details: { executed: false, reason: risk.reason, memoryWarning },
+      };
+    }
+
+    const plan = getExitPlan(price, params.holdMinutes ?? 30);
+    const notional = params.notional || risk.size;
+
+    if (dryRun) {
+      const qty = notional / price;
+      state.recordEntry(
+        params.ticker ?? "",
+        qty,
+        price,
+        notional,
+        plan.exitTime,
+        params.strategy ?? "",
+        { vix, spyChange, regime },
+        { source: params.strategy ?? "", confidence: 0.7, impactScore: 7 },
+        "short"
+      );
+      const memoryPrefix = memoryWarning ? `🧠 MEMORY: ${memoryWarning}\n\n` : "";
+      return {
+        content: [{ type: "text", text: `${memoryPrefix}[DRY RUN] Simulated short $${notional.toFixed(2)} of ${params.ticker} @ $${price.toFixed(2)}\nCover trigger: $${plan.stopPrice.toFixed(2)} | Hold until: ${plan.exitTime.toISOString()}` }],
+        details: { executed: true, dryRun: true, ticker: params.ticker, price, notional, plan, memoryWarning, reason: null as string | null },
+      };
+    }
+
+    try {
+      const order = await submitOrder({
+        symbol: params.ticker!,
+        notional,
+        side: "sell_short",
+        timeInForce: "day",
+      });
+
+      await new Promise((r) => setTimeout(r, 2000));
+      const qty = notional / price;
+      state.recordEntry(
+        params.ticker ?? "",
+        qty,
+        price,
+        notional,
+        plan.exitTime,
+        params.strategy ?? "",
+        { vix, spyChange, regime },
+        { source: params.strategy ?? "", confidence: 0.7, impactScore: 7 },
+        "short"
+      );
+
+      const memoryPrefix = memoryWarning ? `🧠 MEMORY: ${memoryWarning}\n\n` : "";
+      return {
+        content: [{ type: "text", text: `${memoryPrefix}✅ SHORT ORDER PLACED: ${params.ticker}\nNotional: $${notional.toFixed(2)} | Price: $${price.toFixed(2)}\nCover trigger: $${plan.stopPrice.toFixed(2)} | Hold: ${plan.exitTime.toISOString()}\nID: ${order.id}` }],
+        details: { executed: true, order, ticker: params.ticker, price, notional, plan, memoryWarning, reason: null as string | null },
+      };
+    } catch (e: any) {
+      return {
+        content: [{ type: "text", text: `❌ SHORT ORDER FAILED: ${e.message}` }],
+        details: { executed: false, reason: e.message as string | null, memoryWarning: null },
+      };
+    }
+  },
+});
+
 export const placeSellOrderTool = defineTool({
   name: "place_sell_order",
   label: "Place Sell Order",
   description:
     "Execute a sell order to close an open position. No risk checks — exits are always allowed. " +
+    "For LONG positions: sells shares. For SHORT positions: buys to cover (closes the short). " +
     "Use when: stop hit, time stop reached, profit target met, or thesis invalidated.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker to sell" }),
@@ -893,7 +1058,7 @@ export const closePositionTool = defineTool({
   name: "close_position",
   label: "Close Position",
   description:
-    "Evaluate an open position for exit conditions. Returns recommendation. " +
+    "Evaluate an open position for exit conditions. Returns recommendation for both LONG and SHORT positions. " +
     "Does NOT execute — call place_sell_order to actually close.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker to evaluate" }),
@@ -914,31 +1079,35 @@ export const closePositionTool = defineTool({
     const check = checkExitConditions({ position: pos, currentPrice: price || pos.entryPrice });
 
     // Apply status updates
-    if (check.newStatus || check.newTrailingStop !== undefined || check.newHighestPrice) {
+    if (check.newStatus || check.newTrailingStop !== undefined || check.newHighestPrice || check.newLowestPrice) {
       state.updatePositionState(pos.symbol, price || pos.entryPrice, {
         status: check.newStatus,
         trailingStopPrice: check.newTrailingStop,
         highestPrice: check.newHighestPrice,
+        lowestPrice: check.newLowestPrice,
       });
     }
 
     const unrealizedPct = price ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
     const timeHeld = (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
 
+    const directionLabel = pos.direction === "short" ? "SHORT" : "LONG";
+
     const lines: string[] = [
-      `POSITION EXIT ANALYSIS:`,
+      `POSITION EXIT ANALYSIS [${directionLabel}]:`,
       `  ${pos.symbol}: Entry $${pos.entryPrice.toFixed(2)} | Current ${price ? `$${price.toFixed(2)}` : "unavailable"}`,
       `  Unrealized: ${price ? `${unrealizedPct.toFixed(2)}%` : "unknown"}`,
-      `  Status: ${pos.status.toUpperCase()}${pos.status === "initial" ? ` | Time held: ${timeHeld.toFixed(1)} min` : ""}${pos.trailingStopPrice ? ` | Trailing stop: $${pos.trailingStopPrice.toFixed(2)}` : ""}`,
+      `  Status: ${pos.status.toUpperCase()}${pos.status === "initial" ? ` | Time held: ${timeHeld.toFixed(1)} min` : ""}${pos.trailingStopPrice ? ` | ${pos.direction === "short" ? "Cover trigger" : "Trailing stop"}: $${pos.trailingStopPrice.toFixed(2)}` : ""}`,
       `  Evaluation: ${check.reason}`,
     ];
 
     if (check.shouldExit) {
       lines.push("", "🔴 RECOMMENDATION: EXIT NOW", `  Reason: ${check.reason}`, "", "💡 Call place_sell_order to execute exit.");
     } else if (pos.status === "initial") {
-      lines.push("", `🟡 INITIAL HOLD — Need +1% profit to promote to trailing stop.`, `  Time stop in effect: auto-exit if not green within 30 min.`);
+      const holdMsg = pos.direction === "short" ? "Need price drop" : "Need +1% profit";
+      lines.push("", `🟡 INITIAL HOLD — ${holdMsg} to promote to trailing stop.`, `  Time stop in effect: auto-exit if not profitable within 30 min.`);
     } else {
-      lines.push("", `🟢 GREEN — Winner running. Trailing stop active.`, `  Let it ride. Will exit automatically if trailing stop hits.`);
+      lines.push("", `🟢 GREEN — Winner running. Trailing ${pos.direction === "short" ? "cover" : "stop"} active.`, `  Let it ride. Will exit automatically if ${pos.direction === "short" ? "cover trigger" : "trailing stop"} hits.`);
     }
 
     return {
@@ -1329,6 +1498,7 @@ export const allTradingTools = [
   tradeNewsMomentumTool,
   tradeMeanReversionTool,
   placeBuyOrderTool,
+  placeShortOrderTool,
   placeSellOrderTool,
   closePositionTool,
   holdCashTool,

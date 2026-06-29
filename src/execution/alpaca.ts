@@ -89,7 +89,7 @@ export async function submitOrder(params: {
   symbol: string;
   notional?: number;
   qty?: number;
-  side: "buy" | "sell";
+  side: "buy" | "sell" | "sell_short";
   timeInForce?: "day" | "ioc" | "fok";
 }): Promise<AlpacaOrder> {
   const body: Record<string, unknown> = {
@@ -133,6 +133,38 @@ export async function submitOrder(params: {
 export async function liquidateSymbol(symbol: string): Promise<{ success: boolean; order?: AlpacaOrder; error?: string }> {
   try {
     // Alpaca DELETE /v2/positions/{symbol} closes the position
+    const res = await fetch(tradingUrl(`/positions/${symbol}`), {
+      method: "DELETE",
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { success: false, error: text };
+    }
+    const data = await res.json();
+    return {
+      success: true,
+      order: {
+        id: data.id,
+        symbol: data.symbol,
+        qty: data.qty,
+        status: data.status,
+        side: data.side,
+        submittedAt: data.submitted_at,
+      },
+    };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Buy to cover a short position — buys back the borrowed shares.
+ * Alpaca requires side="buy" with a notional/qty that covers the short.
+ */
+export async function coverShort(symbol: string): Promise<{ success: boolean; order?: AlpacaOrder; error?: string }> {
+  try {
+    // Use DELETE /v2/positions/{symbol} which Alpaca handles as buy-to-cover
     const res = await fetch(tradingUrl(`/positions/${symbol}`), {
       method: "DELETE",
       headers: getHeaders(),
@@ -204,8 +236,24 @@ export async function getLatestQuote(symbol: string): Promise<LatestQuote | null
 }
 
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
+  // Use Alpaca's positions endpoint for the official mark price (`current_price`).
+  // This is more reliable than the quote feed, especially in after-hours when
+  // bid-ask spreads are wide and the last quote may be stale.
+  try {
+    const res = await fetch(tradingUrl(`/positions/${symbol}`), { headers: getHeaders() });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.current_price) {
+        return parseFloat(data.current_price);
+      }
+    }
+  } catch {
+    // fall through to quote
+  }
+
+  // Fallback to quote API for symbols without a position
   const quote = await getLatestQuote(symbol);
-  return quote ? quote.askPrice : null;
+  return quote ? quote.bidPrice : null;
 }
 
 // ─── Clock ───────────────────────────────────────────────────────────────────

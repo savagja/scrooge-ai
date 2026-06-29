@@ -16,6 +16,7 @@ import type {
   PersistedState,
   DailyTokenCost,
   DailyReport,
+  Lesson,
 } from "../types.js";
 
 const DATA_DIR = join(process.cwd(), "data");
@@ -84,6 +85,11 @@ export class PortfolioState {
     if (this.state.sessionOutputTokens === undefined) this.state.sessionOutputTokens = 0;
     if (this.state.sessionInputCost === undefined) this.state.sessionInputCost = 0;
     if (this.state.sessionOutputCost === undefined) this.state.sessionOutputCost = 0;
+    // Backwards compat: add direction and lowestPrice to existing positions
+    for (const pos of this.state.positions) {
+      if (!pos.direction) pos.direction = "long";
+      if (pos.lowestPrice === undefined) pos.lowestPrice = pos.entryPrice;
+    }
   }
 
   private resetDailyIfNeeded() {
@@ -220,8 +226,11 @@ export class PortfolioState {
       source: string;
       confidence: number;
       impactScore: number;
-    }
+    },
+    direction?: "long" | "short"
   ) {
+    const isShort = direction === "short";
+    // For shorts, 'qty' is positive (borrowed shares sold), 'notional' is proceeds received
     const pos: Position = {
       symbol,
       qty: Math.round(qty * 1000000) / 1000000,
@@ -231,8 +240,10 @@ export class PortfolioState {
       notional: Math.round(notional * 100) / 100,
       unrealizedPnL: 0,
       strategy,
+      direction: direction ?? "long",
       trailingStopPrice: null,
-      highestPrice: price,
+      highestPrice: isShort ? price : price,  // highestPrice used for exit tracking (re-used for shorts but different semantics)
+      lowestPrice: isShort ? price : price,    // lowestPrice for shorts tracks the trough
       status: "initial",
       entryVix: marketContext?.vix ?? null,
       entrySpyChange: marketContext?.spyChange ?? null,
@@ -242,7 +253,13 @@ export class PortfolioState {
       entrySignalSource: signalMeta?.source ?? strategy,
     };
     this.state.positions.push(pos);
-    this.state.cash = Math.round((this.state.cash - notional) * 100) / 100;
+    // For shorts: notional is the cash received from the short sale (added to cash)
+    // For longs: notional is cash spent (deducted from cash)
+    if (isShort) {
+      this.state.cash = Math.round((this.state.cash + notional) * 100) / 100;
+    } else {
+      this.state.cash = Math.round((this.state.cash - notional) * 100) / 100;
+    }
     this.save();
   }
 
@@ -260,9 +277,26 @@ export class PortfolioState {
     if (idx === -1) return;
 
     const pos = this.state.positions[idx];
-    const proceeds = pos.qty * exitPrice;
-    const pnl = Math.round((proceeds - pos.notional) * 100) / 100;
-    const pnlPct = Math.round((pnl / pos.notional) * 10000) / 100;
+    const isShort = pos.direction === "short";
+
+    let pnl: number;
+    let pnlPct: number;
+    let cashChange: number;
+
+    if (isShort) {
+      // Short: entered by selling (received notional), exit by buying back (pay exitPrice * qty)
+      const buybackCost = pos.qty * exitPrice;
+      pnl = Math.round((pos.notional - buybackCost) * 100) / 100;
+      pnlPct = Math.round((pnl / pos.notional) * 10000) / 100;
+      // Cash: we received notional at entry, now we spend to buy back
+      cashChange = -buybackCost;
+    } else {
+      // Long: entered by buying (spent notional), exit by selling (receive exitPrice * qty)
+      const proceeds = pos.qty * exitPrice;
+      pnl = Math.round((proceeds - pos.notional) * 100) / 100;
+      pnlPct = Math.round((pnl / pos.notional) * 10000) / 100;
+      cashChange = proceeds;
+    }
 
     const holdMin =
       (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
@@ -289,7 +323,7 @@ export class PortfolioState {
       timestamp: new Date().toISOString(),
       symbol: pos.symbol,
       strategy: pos.strategy,
-      direction: "long",
+      direction: isShort ? "short" : "long",
       entryPrice: pos.entryPrice,
       exitPrice: Math.round(exitPrice * 100) / 100,
       qty: pos.qty,
@@ -311,7 +345,7 @@ export class PortfolioState {
     };
 
     this.state.tradeHistory.push(trade);
-    this.state.cash = Math.round((this.state.cash + proceeds) * 100) / 100;
+    this.state.cash = Math.round((this.state.cash + cashChange) * 100) / 100;
     this.state.dailyPnL = Math.round((this.state.dailyPnL + pnl) * 100) / 100;
     this.state.positions.splice(idx, 1);
 
@@ -344,6 +378,7 @@ export class PortfolioState {
       status?: Position["status"];
       trailingStopPrice?: number | null;
       highestPrice?: number;
+      lowestPrice?: number;
     }
   ) {
     const pos = this.state.positions.find((p) => p.symbol === symbol);
@@ -354,17 +389,30 @@ export class PortfolioState {
       pos.trailingStopPrice = updates.trailingStopPrice;
     if (updates.highestPrice)
       pos.highestPrice = Math.max(pos.highestPrice, updates.highestPrice);
+    if (updates.lowestPrice !== undefined)
+      pos.lowestPrice = Math.min(pos.lowestPrice, updates.lowestPrice);
 
-    const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
-    pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    // P&L calculation: for shorts, profit when price drops
+    if (pos.direction === "short") {
+      const unrealized = (pos.entryPrice - currentPrice) * pos.qty;
+      pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    } else {
+      const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
+      pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    }
     this.save();
   }
 
   updatePositionPnL(symbol: string, currentPrice: number) {
     const pos = this.state.positions.find((p) => p.symbol === symbol);
     if (!pos) return;
-    const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
-    pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    if (pos.direction === "short") {
+      const unrealized = (pos.entryPrice - currentPrice) * pos.qty;
+      pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    } else {
+      const unrealized = (currentPrice - pos.entryPrice) * pos.qty;
+      pos.unrealizedPnL = Math.round(unrealized * 100) / 100;
+    }
     this.save();
   }
 
@@ -545,13 +593,81 @@ export class PortfolioState {
     this.save();
   }
 
-  addLesson(lesson: string) {
-    this.state.memory.lessons.push(lesson);
-    if (this.state.memory.lessons.length > 100) {
-      this.state.memory.lessons = this.state.memory.lessons.slice(-50);
-    }
+  /**
+   * REPLACE the entire lesson set (called by the retrospective lesson integrator).
+   * This is NOT additive. The LLM receives existing lessons + new data and returns
+   * an evolved set — some merged, some modified, some removed, some new.
+   */
+  replaceAllLessons(lessons: Lesson[]) {
+    this.state.memory.lessons = lessons;
     this.state.memory.lastReflection = new Date().toISOString();
     this.save();
+  }
+
+  /** Get lessons that are active (not deprecated), sorted by weight descending. */
+  getActiveLessons(): Lesson[] {
+    return this.state.memory.lessons
+      .filter((l) => !l.deprecated)
+      .sort((a, b) => b.weight - a.weight);
+  }
+
+  /** Format active lessons for the perception prompt — compact, weighted. */
+  formatLessonsForPrompt(): string {
+    const active = this.getActiveLessons();
+    if (active.length === 0) return "";
+
+    const lines = ["📚 ACTIVE LESSONS (from retrospective analysis):"];
+    for (const l of active.slice(0, 5)) {
+      const stars = l.weight >= 0.8 ? "🔴" : l.weight >= 0.5 ? "🟡" : "🟢";
+      const ctx = l.context ? ` [${l.context}]` : "";
+      lines.push(`  ${stars} [${l.category}]${ctx} ${l.insight.slice(0, 150)}${l.reinforcementCount > 1 ? ` (confirmed ${l.reinforcementCount}x)` : ""}`);
+    }
+    if (active.length > 5) {
+      lines.push(`  ... and ${active.length - 5} more lessons (use consult_memory to search all)`);
+    }
+    return lines.join("\n");
+  }
+
+  /**
+   * Find lessons relevant to a specific trade setup.
+   * Uses cosine similarity against lesson feature vectors.
+   */
+  findRelevantLessons(featureVector: number[], topK: number = 3): Lesson[] {
+    const active = this.getActiveLessons();
+    if (active.length === 0) return [];
+
+    const scored = active.map((l) => ({
+      lesson: l,
+      similarity: this._cosineSimilarity(featureVector, l.featureVector),
+    }));
+    scored.sort((a, b) => b.similarity - a.similarity);
+    return scored.slice(0, topK).map((s) => s.lesson);
+  }
+
+  /**
+   * Build a lesson feature vector from current market + trade conditions.
+   * Same 7-dim space as trade feature vectors so cosine similarity works.
+   */
+  buildLessonFeatureVector(params: {
+    vix: number | null;
+    regime: string;
+    confidence: number;
+    impactScore: number;
+    notional: number;
+  }): number[] {
+    const vixNorm = Math.min((params.vix ?? 18) / 50, 1.0);
+    const conf = Math.min(Math.max(params.confidence, 0), 1);
+    const impact = Math.min(Math.max(params.impactScore / 10, -1), 1);
+    const size = Math.min(params.notional / 100, 1.0);
+    return [
+      vixNorm,
+      conf,
+      impact,
+      size,
+      params.regime === "trending_up" ? 1 : 0,
+      params.regime === "chop" ? 1 : 0,
+      params.regime === "volatile" ? 1 : 0,
+    ];
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -761,7 +877,7 @@ export class PortfolioState {
       cash: this.state.cash,
       settledCash: this.state.settledCash,
       dailyPnL: this.state.dailyPnL,
-      lessons: this.state.memory.lessons,
+      lessons: this.state.memory.lessons.filter((l) => !l.deprecated).map((l) => l.insight),
       sessionTokens: {
         inputTokens: this.state.sessionInputTokens,
         outputTokens: this.state.sessionOutputTokens,

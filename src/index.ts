@@ -335,6 +335,7 @@ function buildPerceptionPrompt(
   const positions = state.getPositions();
   const portfolio = state.getPortfolio();
   const memory = state.getMemory();
+  const lessonsFormatted = state.formatLessonsForPrompt();
 
   const lines: string[] = [
     `=== MARKET UPDATE (Cycle ${cycle}) ===`,
@@ -369,10 +370,9 @@ function buildPerceptionPrompt(
     }
   }
 
-  if (memory.lessons.length > 0) {
+  if (lessonsFormatted) {
     lines.push("");
-    lines.push("Recent Lessons:");
-    memory.lessons.slice(-3).forEach((l) => lines.push(`  • ${l}`));
+    lines.push(lessonsFormatted);
   }
 
   // ─── Context notes from agent memory ───────────────────────────────
@@ -398,14 +398,16 @@ function buildPerceptionPrompt(
   lines.push("  • scan_range_breaks — 20-day range analysis");
   lines.push("  • scan_reddit — Reddit sentiment details");
   lines.push("  • discover_opportunities — find NEW tickers outside current list");
+  lines.push("  • consult_memory — check accumulated lessons and similar past trades before deciding");
   lines.push("");
   lines.push("INSTRUCTION:");
   lines.push("1. Monitor positions (monitor_positions).");
   lines.push("2. Use the pre-digested context above. If something catches your eye, use ONE tool to verify.");
   lines.push("3. Analyze 1-2 specific tickers with trade_news_momentum or trade_mean_reversion.");
-  lines.push("4. If signal >= impact 4 and >= 45% confidence → place_buy_order.");
-  lines.push("5. If signal is below threshold → hold_cash (explain why nothing passed).");
-  lines.push("6. Remember: Cutting losers fast + trailing stops = risk management. Use it to take smart bets.");
+  lines.push("4. **BEFORE any trade**, call consult_memory to check if past lessons apply.");
+  lines.push("5. If signal >= impact 4 and >= 45% confidence AND memory doesn't warn → place_buy_order (long) or place_short_order (short).");
+  lines.push("6. If signal is below threshold or memory warns strongly → hold_cash (explain why).");
+  lines.push("7. Remember: Cutting losers fast + trailing stops = risk management. Use it to take smart bets.");
   lines.push("");
   lines.push("You should aim to have 1-2 positions open most days. Cash doesn't compound.");
 
