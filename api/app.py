@@ -11,6 +11,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -20,6 +21,61 @@ CORS(app)
 
 # ── path to state.json ──────────────────────────────────────────────────
 STATE_PATH = Path(os.environ.get("SCROOGE_STATE", "/home/admin/scrooge/data/state.json"))
+
+# ── Alpaca live API helpers ──────────────────────────────────────────────
+ALPACA_BASE = "https://paper-api.alpaca.markets"
+
+
+def _get_alpaca_headers():
+    key = os.environ.get("ALPACA_API_KEY", "")
+    secret = os.environ.get("ALPACA_SECRET_KEY", "")
+    return {
+        "APCA-API-KEY-ID": key,
+        "APCA-API-SECRET-KEY": secret,
+    } if key and secret else None
+
+
+def _alpaca_get(path: str):
+    """GET from Alpaca REST API, return parsed JSON or None."""
+    headers = _get_alpaca_headers()
+    if not headers:
+        return None
+    req = Request(f"{ALPACA_BASE}/v2{path}", headers=headers)
+    try:
+        with urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _get_live_account():
+    """Fetch current account from Alpaca. Returns dict with cash, equity, or None."""
+    data = _alpaca_get("/account")
+    if not data:
+        return None
+    return {
+        "cash": float(data.get("cash", 0)),
+        "equity": float(data.get("equity", 0)),
+        "portfolio_value": float(data.get("portfolio_value", 0)),
+    }
+
+
+def _get_live_positions():
+    """Fetch current open positions from Alpaca. Returns list or None."""
+    data = _alpaca_get("/positions")
+    if data is None:
+        return None
+    return [{
+        "symbol": p["symbol"],
+        "qty": float(p["qty"]),
+        "avgEntryPrice": float(p["avg_entry_price"]),
+        "currentPrice": float(p["current_price"]),
+        "marketValue": float(p["market_value"]),
+        "unrealizedPnl": float(p["unrealized_pl"]),
+        "unrealizedPnlPct": float(p["unrealized_plpc"]),
+        "costBasis": float(p["cost_basis"]),
+        "side": p["side"],
+    } for p in data]
 
 
 def load_state():
@@ -42,6 +98,7 @@ def safe_float(v, default=0.0):
 # ─────────────────────────────────────────────────────────────────────────
 #  GET /api/overview
 #  Quick summary for a high-level dashboard widget.
+#  Merges live Alpaca data with state.json for accurate P&L.
 # ─────────────────────────────────────────────────────────────────────────
 @app.route("/api/overview")
 def overview():
@@ -49,18 +106,27 @@ def overview():
     if isinstance(state, tuple):
         return jsonify(state[0]), state[1]
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
 
-    # Latest snapshot for current equity
-    history = state.get("portfolioHistory", [])
-    current_snap = history[-1] if history else None
-    total_equity = safe_float(current_snap["totalEquity"]) if current_snap else safe_float(state["cash"])
+    # Attempt live Alpaca data for accurate cash/equity
+    live_account = _get_live_account()
+    live_positions = _get_live_positions()
 
-    # Pending buys from unsettled cash
-    settled = safe_float(state["settledCash"])
-    pending_buys = max(0, safe_float(state["cash"]) - settled)
+    if live_account:
+        total_equity = live_account["equity"]
+        cash = live_account["cash"]
+    else:
+        # Fallback to state.json
+        history = state.get("portfolioHistory", [])
+        current_snap = history[-1] if history else None
+        total_equity = safe_float(current_snap["totalEquity"]) if current_snap else safe_float(state["cash"])
+        cash = safe_float(state["cash"])
 
-    # Token costs
+    settled = safe_float(live_account["cash"]) if live_account else safe_float(state["settledCash"])
+    pending_buys = max(0, cash - settled)
+    positions_count = len(live_positions) if live_positions is not None else len(state.get("positions", []))
+
+    # Token costs from state
     session_tokens = {
         "inputTokens": state.get("sessionInputTokens", 0),
         "outputTokens": state.get("sessionOutputTokens", 0),
@@ -70,32 +136,26 @@ def overview():
         ),
     }
 
-    # Today's daily change: current equity minus first snapshot of today
+    # Daily change: current equity minus today's starting baseline
     history = state.get("portfolioHistory", [])
     today_snaps = [s for s in history if s.get("timestamp", "").startswith(today)]
-    first_today_equity = safe_float(today_snaps[0]["totalEquity"]) if today_snaps else safe_float(state["cash"])
-    daily_change = round(total_equity - first_today_equity, 2)
-
-    # Token costs
-    session_tokens = {
-        "inputTokens": state.get("sessionInputTokens", 0),
-        "outputTokens": state.get("sessionOutputTokens", 0),
-        "totalCost": round(
-            safe_float(state.get("sessionInputCost", 0)) + safe_float(state.get("sessionOutputCost", 0)),
-            5
-        ),
-    }
+    if today_snaps:
+        baseline_equity = safe_float(today_snaps[0]["totalEquity"])
+    else:
+        # Day rolled over — use last snapshot from previous day
+        baseline_equity = safe_float(history[-1]["totalEquity"]) if history else cash
+    daily_change = round(total_equity - baseline_equity, 2)
 
     daily_token_cost = session_tokens["totalCost"]
 
     return jsonify({
-        "cash": safe_float(state["cash"]),
-        "settledCash": settled,
+        "cash": round(cash, 2),
+        "settledCash": round(settled, 2),
         "totalEquity": round(total_equity, 2),
         "dailyPnL": daily_change,
         "dailyTokenCost": daily_token_cost,
         "sessionTokens": session_tokens,
-        "positionsCount": len(state.get("positions", [])),
+        "positionsCount": positions_count,
         "pendingBuys": round(pending_buys, 2),
         "halted": state.get("halted", False),
         "haltReason": state.get("haltReason"),
@@ -112,7 +172,7 @@ def daily_volume():
     if isinstance(state, tuple):
         return jsonify(state[0]), state[1]
 
-    date_str = request.args.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    date_str = request.args.get("date", datetime.now().astimezone().strftime("%Y-%m-%d"))
     trades = state.get("tradeHistory", [])
 
     # Filter trades by date
@@ -141,7 +201,7 @@ def daily_range():
     if isinstance(state, tuple):
         return jsonify(state[0]), state[1]
 
-    date_str = request.args.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    date_str = request.args.get("date", datetime.now().astimezone().strftime("%Y-%m-%d"))
     history = state.get("portfolioHistory", [])
 
     # Snapshots from this day only
@@ -215,7 +275,7 @@ def equity_curve():
 
 # ─────────────────────────────────────────────────────────────────────────
 #  GET /api/positions
-#  Current open positions with P&L and status.
+#  Current open positions with live P&L from Alpaca.
 # ─────────────────────────────────────────────────────────────────────────
 @app.route("/api/positions")
 def positions():
@@ -223,8 +283,14 @@ def positions():
     if isinstance(state, tuple):
         return jsonify(state[0]), state[1]
 
+    live = _get_live_positions()
+    if live is not None:
+        return jsonify({"positions": live, "source": "live"})
+
+    # Fallback to internal state
     return jsonify({
         "positions": state.get("positions", []),
+        "source": "state",
     })
 
 
@@ -269,7 +335,7 @@ def token_stats():
         }
 
     # Add current session as today's provisional entry
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
     session_input = state.get("sessionInputTokens", 0)
     session_output = state.get("sessionOutputTokens", 0)
     session_cost = round(state.get("sessionInputCost", 0) + state.get("sessionOutputCost", 0), 5)

@@ -12,8 +12,9 @@
  */
 
 import { PortfolioState } from "../state/portfolio.js";
-import type { DailyReport } from "../types.js";
+import type { DailyReport, Lesson, StrategyCalibration } from "../types.js";
 import { analyzeDay } from "./analyzer.js";
+import { integrateLessons } from "./lesson-integrator.js";
 
 /**
  * Check whether the retrospective should run for today.
@@ -39,6 +40,7 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
   const trades = state.getTradesForDay(today);
   const history = state.getSnapshotsForDay(today);
   const lessons = state.getMemory().lessons;
+  const lessonInsights = lessons.filter((l) => !l.deprecated).map((l) => l.insight);
   const calibrationTable = state.getCalibrationTable();
   const tokenCost = state.getDailyTokenCost(today);
 
@@ -65,7 +67,7 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
     grossPnL,
     winRate,
     tokenCost,
-    lessons,
+    lessonInsights,
     calibrationTable,
     history,
     state
@@ -117,11 +119,40 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
     markdown,
   };
 
-  // Persist
+  // Persist the report
   state.saveDailyReport(report);
+
+  // ── EVOLVE LESSONS via the lesson integrator ──────────────────────────
+  // This is a SEPARATE LLM call that takes the retrospective findings
+  // together with existing lessons and returns an evolved set (merge,
+  // modify, overwrite, remove — NOT just additive).
+  console.log(`🧠 Running lesson integrator...`);
+  const calibrationSummary = calibrationTable.length > 0
+    ? calibrationTable.map((c) =>
+        `- ${c.strategy} in ${c.regime}: ${(c.winRate * 100).toFixed(0)}% WR (${c.totalTrades} trades)`
+      ).join("\n")
+    : "No calibration data yet.";
+
+  const existingLessons = state.getMemory().lessons;
+  const evolvedLessons = await integrateLessons({
+    date: today,
+    report,
+    existingLessons,
+    performanceSnapshot: {
+      totalTrades: trades.length,
+      winRate,
+      netPnL,
+      equityChange: totalEquityChange,
+      consecutiveLosses: trades.slice(-5).filter((t) => t.pnl <= 0).length,
+    },
+    calibrationSummary,
+  });
+
+  state.replaceAllLessons(evolvedLessons);
 
   console.log(`✅ Daily retrospective saved for ${today}`);
   console.log(`   Trades: ${trades.length} | Net P&L: $${netPnL.toFixed(2)} | Win Rate: ${winRate.toFixed(1)}%`);
+  console.log(`   Lessons: ${evolvedLessons.length} total (${evolvedLessons.filter((l) => !l.deprecated).length} active)`);
 
   return report;
 }

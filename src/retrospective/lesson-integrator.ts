@@ -1,0 +1,208 @@
+/**
+ * Lesson Integrator — intelligent, non-additive lesson evolution.
+ *
+ * After the daily retrospective report is built, this module makes a separate
+ * LLM call to take the report's findings (whatWorked, whatDidnt, whatToChange)
+ * together with the EXISTING lesson set, and returns an EVOLVED lesson set.
+ *
+ * The LLM decides to:
+ *   - MERGE similar lessons (increase weight, update insight)
+ *   - MODIFY lessons with new information (update insight, adjust context)
+ *   - OVERWRITE lessons that contradicted (increase weight of the correct one, deprecate the wrong one)
+ *   - REMOVE lessons that are no longer relevant (set deprecated=true)
+ *   - CREATE new lessons from novel insights
+ *
+ * This is NOT additive. The LLM returns the COMPLETE new lesson set.
+ * The integrator is stateless — it receives all context and returns the new set.
+ */
+
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+
+import type { Lesson, DailyReport } from "../types.js";
+
+export interface IntegratorInput {
+  /** Today's date */
+  date: string;
+  /** The report that was just generated */
+  report: DailyReport;
+  /** All existing lessons (active + deprecated) */
+  existingLessons: Lesson[];
+  /** Summary of recent performance metrics */
+  performanceSnapshot: {
+    totalTrades: number;
+    winRate: number;
+    netPnL: number;
+    equityChange: number;
+    consecutiveLosses: number;
+  };
+  /** Calibration table summary for context */
+  calibrationSummary: string;
+}
+
+export interface IntegratorOutput {
+  /** Complete new lesson set — replaces all previous lessons */
+  lessons: Lesson[];
+}
+
+/**
+ * Evolve the lesson set based on today's retrospective report.
+ */
+export async function integrateLessons(input: IntegratorInput): Promise<Lesson[]> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    console.warn("[LESSON-INTEGRATOR] No OPENROUTER_API_KEY — keeping existing lessons unchanged");
+    return input.existingLessons;
+  }
+
+  const model = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite";
+
+  const systemPrompt = `You are the memory consolidation system for Scrooge, an autonomous AI trading bot.
+
+Your job: Evolve the bot's accumulated trading lessons based on new daily evidence.
+
+## How lessons work
+Each lesson has:
+- id: Stable identifier (keep it if the lesson is an evolution of an existing one; create new if truly novel)
+- category: One of "risk", "strategy", "timing", "research", "psychology", "general"
+- insight: The lesson text — clear, specific, actionable
+- weight: 0.0-1.0 — how strongly held this lesson is
+- reinforcementCount: incremented when the lesson is confirmed again
+- context: Optional regime/strategy scoping (e.g. "regime:volatile", "strategy:news_momentum")
+- featureVector: 7 floats [vix/50, confidence, impact/10, notional/100, trending_up_flag, chop_flag, volatile_flag]
+- deprecated: whether this lesson should be hidden
+
+## Decision rules
+1. If a new insight from today is SIMILAR to an existing lesson → MERGE by updating the existing lesson's insight to the best synthesis, and increment its reinforcementCount. Keep the same id. Increase weight (cap at 1.0).
+
+2. If a new insight CONTRADICTS an existing lesson → keep the one with more evidence. If the new evidence is stronger, deprecate the old lesson and create a new one. If the old evidence is stronger, skip the new insight.
+
+3. If a new insight is NOVEL (no similar existing lesson) → create a new lesson with id "L_" + random 8 chars, weight 0.3, reinforcementCount 1.
+
+4. If an existing lesson has not been reinforced in many cycles and current evidence suggests it's no longer relevant → set deprecated=true with a note in the insight. A deprecated lesson is kept for reference but won't be shown to the agent.
+
+5. If an existing lesson's insight is still valid but needs refinement based on today's data → modify the insight text, adjust weight, increment reinforcementCount.
+
+6. Lessons with weight > 0.8 should be concise and definitive. They represent hard rules the agent should follow.
+
+## Feature vector guidance
+For each lesson, generate a featureVector (7 floats) representing the market conditions where this lesson applies. If the lesson is regime-agnostic, use [0.4, 0.5, 0, 0.5, 0, 0, 0]. If regime-specific, set the appropriate regime flag.
+
+## Output format
+Respond with ONLY valid JSON:
+{
+  "lessons": [
+    {
+      "id": "string",
+      "category": "risk|strategy|timing|research|psychology|general",
+      "insight": "string",
+      "weight": 0.0-1.0,
+      "reinforcementCount": number,
+      "createdAt": "ISO timestamp (preserve original if merging, new one if creating)",
+      "lastReinforcedAt": "ISO timestamp (today)",
+      "deprecated": false,
+      "context": "string | null",
+      "featureVector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    }
+  ]
+}
+
+IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed. Do not drop lessons unless you set deprecated=true. Keep the total number manageable (aim for 5-20 active lessons).`;
+
+  const userPrompt = buildIntegratorPrompt(input);
+
+  try {
+    const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://scrooge-trading-bot.local",
+        "X-Title": "Scrooge Lesson Integrator",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.2,
+        max_tokens: 4096,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn(`[LESSON-INTEGRATOR] OpenRouter error: ${res.status} ${text.slice(0, 200)}`);
+      return input.existingLessons;
+    }
+
+    const raw = await res.json();
+    const content: string = raw.choices?.[0]?.message?.content || "";
+
+    // Extract JSON from potential markdown fences
+    let cleaned = content.replace(/```json\s*|```\s*/g, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) cleaned = match[0];
+
+    const parsed = JSON.parse(cleaned) as IntegratorOutput;
+
+    if (!parsed.lessons || !Array.isArray(parsed.lessons) || parsed.lessons.length === 0) {
+      console.warn("[LESSON-INTEGRATOR] LLM returned empty lesson set — keeping existing");
+      return input.existingLessons;
+    }
+
+    console.log(`[LESSON-INTEGRATOR] Evolved lesson set: ${parsed.lessons.length} lessons ` +
+      `(${parsed.lessons.filter((l) => !l.deprecated).length} active, ` +
+      `${parsed.lessons.filter((l) => l.deprecated).length} deprecated)`);
+
+    return parsed.lessons;
+  } catch (e: any) {
+    console.warn(`[LESSON-INTEGRATOR] Failed: ${e.message}`);
+    return input.existingLessons;
+  }
+}
+
+function buildIntegratorPrompt(input: IntegratorInput): string {
+  const lines: string[] = [
+    `## Lesson Integration — ${input.date}`,
+    ``,
+    `### Today's Performance`,
+    `- Trades: ${input.performanceSnapshot.totalTrades}`,
+    `- Win Rate: ${input.performanceSnapshot.winRate.toFixed(1)}%`,
+    `- Net P&L: $${input.performanceSnapshot.netPnL.toFixed(2)}`,
+    `- Equity Change: $${input.performanceSnapshot.equityChange.toFixed(2)}`,
+    `- Consecutive Losses: ${input.performanceSnapshot.consecutiveLosses}`,
+    ``,
+    `### Today's Retrospective Findings`,
+    ``,
+    `**What Worked:**`,
+    input.report.whatWorked,
+    ``,
+    `**What Didn't Work:**`,
+    input.report.whatDidnt,
+    ``,
+    `**What to Change:**`,
+    input.report.whatToChange,
+    ``,
+    `### Strategy × Regime Calibration`,
+    input.calibrationSummary || "No calibration data yet.",
+    ``,
+    `### Existing Lessons (${input.existingLessons.length} total, ${input.existingLessons.filter((l) => !l.deprecated).length} active)`,
+    ``,
+  ];
+
+  for (const l of input.existingLessons) {
+    const status = l.deprecated ? "DEPRECATED" : `active (weight: ${l.weight.toFixed(2)}, reinforced: ${l.reinforcementCount}x)`;
+    const ctx = l.context ? ` [${l.context}]` : "";
+    lines.push(`- [${l.id}] [${l.category}]${ctx} ${status}`);
+    lines.push(`  "${l.insight}"`);
+    lines.push(`  featureVector: [${l.featureVector.map((v) => v.toFixed(2)).join(", ")}]`);
+    lines.push(`  Created: ${l.createdAt.slice(0, 10)} | Last reinforced: ${l.lastReinforcedAt.slice(0, 10)}`);
+    lines.push(``);
+  }
+
+  lines.push(`---`);
+  lines.push(`Now evolve this lesson set based on today's retrospective. Consider what was learned today, what was contradicted, what should be merged, what is obsolete. Return the COMPLETE new set.`);
+
+  return lines.join("\n");
+}

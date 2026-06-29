@@ -11,7 +11,6 @@ import {
   SettingsManager,
   type ResourceLoader,
   createExtensionRuntime,
-  getModel,
 } from "@earendil-works/pi-coding-agent";
 import { TRADING_SYSTEM_PROMPT } from "./system-prompt.js";
 import { allTradingTools } from "./tools.js";
@@ -35,7 +34,7 @@ export async function createTradingBrain(openRouterKey?: string) {
     "google/gemini-2.5-flash",
   ].filter(Boolean) as string[];
 
-  let model: ReturnType<typeof modelRegistry.find> = undefined;
+  let model: ReturnType<ModelRegistry["find"]> = undefined;
   for (const mid of knownModels) {
     model = modelRegistry.find("openrouter", mid);
     if (model) {
@@ -62,10 +61,12 @@ export async function createTradingBrain(openRouterKey?: string) {
   };
 
   // 5. Settings — aggressive compaction to control token costs
+  // Compaction keeps recent tokens (roughly ~12 turns worth) and discards old context
   const settingsManager = SettingsManager.inMemory({
     compaction: {
       enabled: true,
-      maxTurns: 12,           // Keep only last 12 turns (~3 cycles at 4 tool calls each)
+      keepRecentTokens: 12000,  // Keep ~12K tokens of recent context (~12 turns)
+      reserveTokens: 4000,      // Reserve 4K tokens for the response
     },
     retry: { enabled: false }, // Disable retries to prevent runaway costs on errors
   });

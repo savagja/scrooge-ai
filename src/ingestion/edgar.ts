@@ -17,7 +17,7 @@ import { XMLParser } from "fast-xml-parser";
 const EDGAR_RSS = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom";
 const SEC_HEADERS = { "User-Agent": "ScroogeBot/1.0 (contact@example.com)" };
 
-interface EdgarEntry {
+export interface EdgarEntry {
   id: string;
   cik: string;
   ticker: string;
