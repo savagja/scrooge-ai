@@ -230,18 +230,20 @@ function computeVolatility(closes: number[], period: number): number | null {
 export async function refreshFundamentals(store: SignalStore, watchlist: string[]): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
 
+  // Helper: convert camelCase to snake_case for DB columns
+  function toSnake(data: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(data)) {
+      result[key.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())] = val;
+    }
+    return result;
+  }
+
   // Phase 1: Quick daily quote data from Yahoo chart (fast, no API key)
   const quotePromises = watchlist.slice(0, 50).map(async (sym) => {
     const quote = await fetchYahooQuote(sym);
     if (!quote) return;
-
-    const data: Record<string, unknown> = {};
-    if (quote.marketCap !== null) data.marketCap = quote.marketCap;
-    if (quote.peRatio !== null) data.peRatio = quote.peRatio;
-    if (quote.forwardPe !== null) data.forwardPe = quote.forwardPe;
-    if (quote.epsTtm !== null) data.epsTtm = quote.epsTtm;
-    if (quote.beta !== null) data.beta = quote.beta;
-
+    const data = toSnake(quote as unknown as Record<string, unknown>);
     store.upsertFundamentals(sym, today, "yahoo_finance", data);
 
     // Update ticker metadata
@@ -258,7 +260,7 @@ export async function refreshFundamentals(store: SignalStore, watchlist: string[
     const statsPromises = watchlist.slice(0, 30).map(async (sym) => {
       const stats = await fetchYahooStats(sym);
       if (!stats) return;
-      store.upsertFundamentals(sym, today, "yahoo_finance", stats as Record<string, unknown>);
+      store.upsertFundamentals(sym, today, "yahoo_finance", toSnake(stats as unknown as Record<string, unknown>));
     });
     await Promise.allSettled(statsPromises);
     console.log(`[RESEARCH] Weekly stats refreshed for ${watchlist.length} tickers`);
@@ -268,16 +270,7 @@ export async function refreshFundamentals(store: SignalStore, watchlist: string[
   const techPromises = watchlist.slice(0, 50).map(async (sym) => {
     const tech = await computeTechnicalIndicators(sym);
     if (!tech) return;
-
-    const data: Record<string, unknown> = {};
-    if (tech.avgVolume20d !== null) data.avgVolume20d = tech.avgVolume20d;
-    if (tech.avgVolume50d !== null) data.avgVolume50d = tech.avgVolume50d;
-    if (tech.sma20 !== null) data.sma20 = tech.sma20;
-    if (tech.sma50 !== null) data.sma50 = tech.sma50;
-    if (tech.sma200 !== null) data.sma200 = tech.sma200;
-    if (tech.rsi14 !== null) data.rsi14 = tech.rsi14;
-    if (tech.volatility30d !== null) data.volatility30d = tech.volatility30d;
-
+    const data = toSnake(tech as unknown as Record<string, unknown>);
     store.upsertFundamentals(sym, today, "alpaca_bars", data);
   });
 
