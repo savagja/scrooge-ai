@@ -15,14 +15,16 @@
 import { config } from "dotenv";
 config();
 
-import { getConfig, reloadConfig } from "./config.js";
+import { getConfig, reloadConfig, getTradingDate } from "./config.js";
 import { createTradingBrain } from "./brain/agent.js";
 import { setGlobalState, requireState, getWatchlist } from "./brain/tools.js";
 import { PortfolioState } from "./state/portfolio.js";
-import { getAccount, getOpenPositions, getClock } from "./execution/alpaca.js";
+import { getAccount, getOpenPositions, getClock, buildTickerContext } from "./execution/alpaca.js";
 import { getVix, getSpyChange } from "./ingestion/market.js";
 import { buildMarketContext, formatContextForPrompt, buildPreMarketBriefing, resetContextHistory } from "./context/builder.js";
 import { runDailyRetrospective, shouldRunRetrospective } from "./retrospective/retrospective.js";
+import { checkExitConditions } from "./risk/guardrails.js";
+import { initResearch, stopResearch } from "./research/index.js";
 import type { MarketState } from "./types.js";
 
 // ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -40,13 +42,22 @@ async function main(isRetry = false) {
     const state = new PortfolioState(cfg.initialCapital);
     setGlobalState(state, cfg.watchlist);
 
-    console.log(`💰 Initial Capital: $${cfg.initialCapital}`);
-    console.log(`🧪 Dry Run: ${cfg.execution.dryRun ? "YES — no real trades" : "NO"}`);
-    console.log(`📋 Seed Watchlist: ${cfg.watchlist.slice(0, 5).join(",")}... (${cfg.watchlist.length} tickers)`);
-    console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? "configured" : "NOT SET"}`);
-    console.log(`🔑 Alpaca: ${process.env.ALPACA_API_KEY ? "configured" : "NOT SET"}`);
-    console.log(`⚙️  Config: max_pos=${(cfg.risk.maxPositionPct * 100).toFixed(0)}%, stop=${(cfg.risk.stopLossPct * 100).toFixed(0)}%, trailing=${(cfg.risk.trailingStopPct * 100).toFixed(0)}%, hold=${cfg.signal.holdMinutes}min`);
+    console.log('💰 Initial Capital: $' + cfg.initialCapital);
+    console.log('🧪 Dry Run: ' + (cfg.execution.dryRun ? 'YES - no real trades' : 'NO'));
+    console.log('📋 Seed Watchlist: ' + cfg.watchlist.slice(0, 5).join(',') + '... (' + cfg.watchlist.length + ' tickers)');
+    console.log('🔑 OpenRouter: ' + (process.env.OPENROUTER_API_KEY ? 'configured' : 'NOT SET'));
+    console.log('🔑 Alpaca: ' + (process.env.ALPACA_API_KEY ? 'configured' : 'NOT SET'));
+    console.log('⚙️  Config: stop=' + (cfg.risk.stopLossPct * 100).toFixed(0) + '%, trailing=' + (cfg.risk.trailingStopPct * 100).toFixed(0) + '%, hold=' + cfg.signal.holdMinutes + 'min');
     console.log();
+
+    // ════════════════════════════════════════════════════════════
+    // RESEARCH ENGINE — Starts its own independent timer, runs 24/7
+    // ════════════════════════════════════════════════════════════
+    if (cfg.research.enabled) {
+      initResearch(cfg.research.dbPath, cfg.watchlist)
+        .then(() => console.log('📡 Research engine started (' + cfg.research.dbPath + ')'))
+        .catch((e) => console.warn('⚠️  Research engine init failed: ' + e.message));
+    }
   }
 
   // Use requireState() — works on both first run and retry
@@ -59,8 +70,26 @@ async function main(isRetry = false) {
     console.log("🔄 Syncing with Alpaca account...");
     try {
       const account = await getAccount();
-    state.syncAccount(account.cash, account.settledCash);
-    console.log(`   Cash: $${account.cash.toFixed(2)} | Settled: $${account.settledCash.toFixed(2)} | Equity: $${account.equity.toFixed(2)}`);
+      state.syncAccount(account.cash, account.settledCash);
+      console.log(`   Cash: $${account.cash.toFixed(2)} | Settled: $${account.settledCash.toFixed(2)} | Equity: $${account.equity.toFixed(2)}`);
+
+      // Backfill today's existing snapshots with Alpaca equity data
+      const today = getTradingDate();
+      const history = state.getPortfolioHistory();
+      const todaySnaps = history.filter(s => s.timestamp.slice(0, 10) === today);
+      if (todaySnaps.length > 0) {
+        // Use last_equity (prior close) as the starting baseline
+        const startEquity = account.lastEquity;
+        const currentEquity = account.equity;
+        // Linearly interpolate: early snapshots near startEquity, later ones near currentEquity
+        const total = todaySnaps.length;
+        for (let i = 0; i < total; i++) {
+          const t = total > 1 ? i / (total - 1) : 1;
+          todaySnaps[i].totalEquity = Math.round((startEquity + (currentEquity - startEquity) * t) * 100) / 100;
+        }
+        console.log(`   📊 Backfilled ${total} today's snapshots (${startEquity.toFixed(2)} -> ${currentEquity.toFixed(2)})`);
+        state.save();
+      }
 
     // Reconcile open positions
     const alpacaPositions = await getOpenPositions();
@@ -133,6 +162,11 @@ async function main(isRetry = false) {
       state.setPreMarketBriefing(briefing);
       console.log(`✅ Pre-market briefing saved (${briefing.split("\n").length} lines)`);
       console.log();
+
+      state.recordActivity("briefing", "Pre-market briefing built", {
+        details: briefing.slice(0, 300),
+        metadata: { lineCount: briefing.split("\n").length, scheduled: true },
+      });
     }
 
     console.log(`⏰ Market is closed. Retrying in ${cfg.pollIntervalMs / 1000}s...`);
@@ -149,6 +183,7 @@ async function main(isRetry = false) {
       console.log("\n📋 Market closed — running daily retrospective...");
       try {
         await runDailyRetrospective(state);
+        state.recordActivity("retrospective", "Daily retrospective completed");
       } catch (e: any) {
         console.error("❌ Retrospective failed:", e.message);
       }
@@ -175,10 +210,15 @@ async function main(isRetry = false) {
     console.log();
   }
 
+  state.recordActivity("system", `Agent session started — ${cfg.execution.dryRun ? "DRY RUN" : "live trading"}`, {
+    metadata: { dryRun: cfg.execution.dryRun, initialCash: cfg.initialCapital, watchlist: cfg.watchlist.slice(0, 10) },
+  });
+
   // ─── EVENT LOOP ────────────────────────────────────────────────────────────
 
   let loopCount = 0;
   let lastAgentOutput = "";
+  let _lastRegime: string | null = null;
 
   session.subscribe((event) => {
     if (event.type === "message_update") {
@@ -272,6 +312,16 @@ async function main(isRetry = false) {
 
       const now = new Date().toISOString();
 
+      // ── RE-CHECK MARKET CLOCK ─────────────────────────────────────────
+      // Verify the market is still open. If it closed since we started the
+      // event loop, exit so the off-hours handler (retrospective, etc.) runs.
+      // Also prevents the LLM from hallucinating "market closed" — we prove it.
+      const currentClock = await getClock();
+      if (!currentClock.isOpen) {
+        console.log(`[${now}] ⏰ Market closed (detected by clock check) — exiting event loop.`);
+        break;
+      }
+
       // ── PROGRAMMATIC PERCEPTION ─────────────────────────────────────────
       // Build multi-source context: VIX, SPY, headlines, EDGAR, volume,
       // Reddit, gaps, and sector movers — all gathered in parallel.
@@ -289,10 +339,45 @@ async function main(isRetry = false) {
         regime: ctx.market.regime as "trending_up" | "trending_down" | "chop" | "volatile" | "unknown",
       };
 
-      // Record snapshot for equity curve
-      state.addSnapshot(ctx.market.vix ?? null, marketState.regime);
+      // Fetch Alpaca's official equity for accurate snapshot
+      let alpacaEquity: number | null = null;
+      try {
+        const account = await getAccount();
+        alpacaEquity = account.equity;
+      } catch {
+        // Fall back to internal calculation
+      }
 
-      const perceptionPrompt = buildPerceptionPrompt(marketState, ctx, state, loopCount, cfg);
+      // Record snapshot for equity curve
+      state.addSnapshot(ctx.market.vix ?? null, marketState.regime, alpacaEquity);
+
+      // ── REGIME SHIFT DETECTION ────────────────────────────────────────
+      // Track regime changes and log them to the activity stream
+      if (loopCount > 1 && _lastRegime && _lastRegime !== marketState.regime) {
+        state.recordActivity("regime_shift", `Market regime changed from ${_lastRegime} → ${marketState.regime} (VIX ${marketState.vix?.toFixed(1) ?? "?"}, SPY ${marketState.spyChangePct?.toFixed(1) ?? "?"}%)`, {
+          details: `Regime transition detected: ${_lastRegime} → ${marketState.regime}. Adjusting strategy bias accordingly.`,
+          metadata: { from: _lastRegime, to: marketState.regime, vix: marketState.vix, spyChange: marketState.spyChangePct },
+        });
+      }
+      _lastRegime = marketState.regime;
+
+      const perceptionPrompt = await buildPerceptionPrompt(marketState, ctx, state, loopCount, cfg);
+
+      // Log this cycle to the activity stream
+      const positionsForLog = state.getPositions();
+      const regimeLabel = marketState.regime;
+      state.recordActivity("cycle",
+        `Cycle ${loopCount}: ${regimeLabel.toUpperCase()} market | ${positionsForLog.length} positions | VIX ${marketState.vix?.toFixed(1) ?? "?"} | daily P&L $${state.getDailyPnL().toFixed(2)}`,
+        {
+          details: `VIX=${marketState.vix?.toFixed(1) ?? "?"}, SPY=${marketState.spyChangePct?.toFixed(2) ?? "?"}%, breadth=${marketState.breadth}, regime=${regimeLabel}, positions=${positionsForLog.length}, cash=$${state.getCash().toFixed(2)}, dailyPnL=$${state.getDailyPnL().toFixed(2)}`,
+          metadata: {
+            cycle: loopCount, regime: regimeLabel, vix: marketState.vix,
+            spyChange: marketState.spyChangePct, breadth: marketState.breadth,
+            positionsCount: positionsForLog.length, cash: state.getCash(),
+            dailyPnL: state.getDailyPnL()
+          },
+        }
+      );
 
       console.log(`[${now}] 📡 Cycle ${loopCount} — perception sent...`);
 
@@ -308,12 +393,15 @@ async function main(isRetry = false) {
     // ── MARKET CLOSE: Run daily retrospective ────────────────────────────
     // We reach here if the event loop exits (market closed, error, or process signal).
     // Check if we've already generated today's report to avoid double-run.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTradingDate();
     const latestReport = state.getLatestReport();
     if (!latestReport || latestReport.date !== today) {
       console.log("\n📋 Market session ended — running daily retrospective...");
       try {
         await runDailyRetrospective(state);
+        state.recordActivity("retrospective", "Daily retrospective completed — market session ended", {
+          metadata: { date: today },
+        });
       } catch (e: any) {
         console.error("❌ Retrospective failed:", e.message);
       }
@@ -325,13 +413,13 @@ async function main(isRetry = false) {
   }
 }
 
-function buildPerceptionPrompt(
+async function buildPerceptionPrompt(
   market: MarketState,
   ctx: any,
   state: PortfolioState,
   cycle: number,
   cfg: ReturnType<typeof getConfig>
-): string {
+): Promise<string> {
   const positions = state.getPositions();
   const portfolio = state.getPortfolio();
   const memory = state.getMemory();
@@ -347,27 +435,75 @@ function buildPerceptionPrompt(
     `  Breadth: ${market.breadth ?? "unknown"}`,
     `  Regime: ${market.regime}`,
     ``,
-    `Risk Settings (from config):`,
-    `  Max Position: ${(cfg.risk.maxPositionPct * 100).toFixed(0)}%`,
-    `  Stop Loss: ${(cfg.risk.stopLossPct * 100).toFixed(0)}%`,
-    `  Trailing Stop: ${(cfg.risk.trailingStopPct * 100).toFixed(0)}%`,
-    `  Green Threshold: ${(cfg.risk.greenThreshold * 100).toFixed(0)}%`,
-    `  Time Stop: ${cfg.signal.holdMinutes} min`,
-    `  Daily Loss Halt: ${(cfg.risk.maxDailyLossPct * 100).toFixed(0)}%`,
-    ``,
     `Your Portfolio:`,
     `  Cash: $${portfolio.cash.toFixed(2)}`,
     `  Settled: $${portfolio.settledCash.toFixed(2)}`,
     `  Daily P&L: $${portfolio.dailyPnL.toFixed(2)}`,
-    `  Open Positions: ${positions.length} / ${cfg.risk.maxOpenPositions} max`,
+    `  Open Positions: ${positions.length} open`,
   ];
 
   if (positions.length > 0) {
-    lines.push("");
-    for (const p of positions) {
-      const statusIcon = p.status === "initial" ? "🟡" : p.status === "green" ? "🟢" : "🔵";
-      lines.push(`  ${statusIcon} [${p.symbol}] ${p.qty.toFixed(4)} @ $${p.entryPrice.toFixed(2)} (status: ${p.status}) (unrealized: $${p.unrealizedPnL.toFixed(2)})`);
+    // Run exit condition checks AND fetch ticker context for each position in parallel
+    const { getCurrentPrice } = await import("./execution/alpaca.js");
+
+    const exitChecks = await Promise.all(
+      positions.map(async (p) => {
+        const currentPrice = await getCurrentPrice(p.symbol);
+        if (!currentPrice) return { symbol: p.symbol, exitCheck: null, currentPrice: null };
+
+        const exitCheck = checkExitConditions({ position: p, currentPrice });
+
+        // Apply state updates from exit check
+        if (exitCheck.newStatus || exitCheck.newTrailingStop !== undefined || exitCheck.newHighestPrice) {
+          state.updatePositionState(p.symbol, currentPrice, {
+            status: exitCheck.newStatus,
+            trailingStopPrice: exitCheck.newTrailingStop,
+            highestPrice: exitCheck.newHighestPrice,
+          });
+        }
+
+        return { symbol: p.symbol, exitCheck, currentPrice };
+      })
+    );
+    const exitMap = new Map(exitChecks.map(e => [e.symbol, e]));
+
+    // Build ticker context for each position
+    const contextPromises = positions.map(p => {
+      const exit = exitMap.get(p.symbol);
+      return buildTickerContext({
+        symbol: p.symbol,
+        entryPrice: p.entryPrice,
+        qty: p.qty,
+        unrealizedPnL: p.unrealizedPnL,
+        highestPrice: p.highestPrice,
+        lowestPrice: p.lowestPrice,
+        trailingStopPrice: p.trailingStopPrice,
+        status: p.status,
+        entryTime: p.entryTime,
+        entryRegime: p.entryRegime,
+        entryVix: p.entryVix,
+        entrySignalSource: p.entrySignalSource,
+        entrySignalConfidence: p.entrySignalConfidence,
+        entrySignalImpactScore: p.entrySignalImpactScore,
+        strategy: p.strategy,
+        currentRegime: market.regime,
+        currentVix: market.vix,
+      });
+    });
+
+    const contextBlocks = await Promise.all(contextPromises);
+
+    for (const block of contextBlocks) {
+      lines.push("");
+      lines.push(...block);
     }
+
+    lines.push("");
+    lines.push("═══ DECISION ═══");
+    lines.push("Above is the full mult-timeframe context for each open position. Key questions:");
+    lines.push("  • If the position is nearing a stop (trailing or hard) → place_sell_order");
+    lines.push("  • If thesis invalidated (regime changed, catalyst dead) but stops haven't hit → close_position to self-evaluate, then place_sell_order");
+    lines.push("  • If thesis confirmed and working → let the stop ride, do nothing");
   }
 
   if (lessonsFormatted) {
@@ -400,16 +536,23 @@ function buildPerceptionPrompt(
   lines.push("  • discover_opportunities — find NEW tickers outside current list");
   lines.push("  • consult_memory — check accumulated lessons and similar past trades before deciding");
   lines.push("");
-  lines.push("INSTRUCTION:");
-  lines.push("1. Monitor positions (monitor_positions).");
-  lines.push("2. Use the pre-digested context above. If something catches your eye, use ONE tool to verify.");
-  lines.push("3. Analyze 1-2 specific tickers with trade_news_momentum or trade_mean_reversion.");
-  lines.push("4. **BEFORE any trade**, call consult_memory to check if past lessons apply.");
-  lines.push("5. If signal >= impact 4 and >= 45% confidence AND memory doesn't warn → place_buy_order (long) or place_short_order (short).");
-  lines.push("6. If signal is below threshold or memory warns strongly → hold_cash (explain why).");
-  lines.push("7. Remember: Cutting losers fast + trailing stops = risk management. Use it to take smart bets.");
+  lines.push("⚠️  IMPORTANT: The market is CURRENTLY OPEN. Alpaca clock confirms this.");
+  lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
+  lines.push("    If you see a timestamp that looks late, ignore it — the event loop handles clock checks.");
+  lines.push("    Your job is to trade, not to decide when the market closes.");
   lines.push("");
-  lines.push("You should aim to have 1-2 positions open most days. Cash doesn't compound.");
+  lines.push("");
+  lines.push("INSTRUCTION:");
+  lines.push("1. Review positions first — check if each original thesis still holds given current market conditions.");
+  lines.push("2. For thesis invalidation: use close_position to evaluate, then place_sell_order.");
+  lines.push("3. For mechanical exits: use monitor_positions to check stops, then place_sell_order.");
+  lines.push("4. Use the pre-digested context above. If something catches your eye, use ONE tool to verify.");
+  lines.push("5. Analyze tickers with trade_news_momentum or trade_mean_reversion if you see a setup.");
+  lines.push("6. **BEFORE any trade**, call consult_memory to check if past lessons and similar trades apply.");
+  lines.push("7. If you have a thesis → place_buy_order (long) or place_short_order (short).");
+  lines.push("8. If nothing passes your bar → hold_cash (explain why).");
+  lines.push("9. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
+  lines.push("10. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
 
   return lines.join("\n");
 }
@@ -417,4 +560,16 @@ function buildPerceptionPrompt(
 main().catch((err) => {
   console.error("Uncaught error:", err);
   process.exit(1);
+});
+
+// Clean shutdown on SIGINT/SIGTERM
+process.on("SIGINT", () => {
+  console.log("\n⚠️  Shutting down...");
+  stopResearch();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  console.log("\n⚠️  Received SIGTERM...");
+  stopResearch();
+  process.exit(0);
 });

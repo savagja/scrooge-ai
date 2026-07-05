@@ -14,6 +14,7 @@
 import { PortfolioState } from "../state/portfolio.js";
 import type { DailyReport, Lesson, StrategyCalibration } from "../types.js";
 import { analyzeDay } from "./analyzer.js";
+import { getTradingDate } from "../config.js";
 import { integrateLessons } from "./lesson-integrator.js";
 
 /**
@@ -21,7 +22,7 @@ import { integrateLessons } from "./lesson-integrator.js";
  * Returns true if no report exists for the current date yet.
  */
 export async function shouldRunRetrospective(state: PortfolioState): Promise<boolean> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTradingDate();
   const latestReport = state.getLatestReport();
   return !latestReport || latestReport.date !== today;
 }
@@ -33,7 +34,7 @@ export async function shouldRunRetrospective(state: PortfolioState): Promise<boo
  * Returns the completed DailyReport and persists it to state.json.
  */
 export async function runDailyRetrospective(state: PortfolioState): Promise<DailyReport> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTradingDate();
   console.log(`📋 Running daily retrospective for ${today}...`);
 
   // Gather raw data
@@ -44,9 +45,16 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
   const calibrationTable = state.getCalibrationTable();
   const tokenCost = state.getDailyTokenCost(today);
 
-  // Compute stats
-  const startingEquity = history.length > 0 ? history[0].totalEquity : 0;
-  const endingEquity = history.length > 0 ? history[history.length - 1].totalEquity : state.getCash();
+  // Compute stats — never use 0 as starting equity, always fall back to the actual equity
+  const allHistory = state.getSnapshotHistory();
+  const startingEquity = history.length > 0
+    ? history[0].totalEquity
+    : allHistory.length > 0
+      ? allHistory[allHistory.length - 1].totalEquity
+      : state.getSettledCash();
+  const endingEquity = history.length > 0
+    ? history[history.length - 1].totalEquity
+    : await state.getAccountEquity();
   const totalEquityChange = endingEquity - startingEquity;
 
   const wins = trades.filter((t) => t.pnl > 0);

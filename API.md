@@ -36,7 +36,8 @@ High-level account summary — ideal for a top-bar widget.
 | `cash` | number | Total cash (including unsettled) |
 | `settledCash` | number | Cash available to trade (T+1 settled) |
 | `totalEquity` | number | Cash + open position notional + unrealized P&L |
-| `dailyPnL` | number | Realized P&L for today |
+| `dailyPnL` | number | Realized P&L for today (current equity − start-of-day equity) |
+| `dailyTokenCost` | number | Total token cost accrued so far today |
 | `positionsCount` | int | Number of open positions |
 | `pendingBuys` | number | Unsettled cash (cash - settledCash) |
 | `halted` | bool | Whether trading is halted |
@@ -157,6 +158,7 @@ Rolling equity curve — one data point per day. Down-sampled to daily close fro
 | `close` | number | Last portfolio snapshot's totalEquity for that day |
 | `high` | number | Highest totalEquity that day |
 | `low` | number | Lowest totalEquity that day |
+| `dailyPnL` | number | Snapshotted daily P&L (last snapshot's `dailyPnL` value for that day) |
 
 **Note:** In a new bot with no trading history, all points show the initial capital since equity hasn't moved.
 
@@ -292,6 +294,85 @@ Recent trade history, newest first.
 
 ---
 
+## `GET /api/activity-stream?hours=24&type=trade_opened`
+
+Human-readable event log — "what has Scrooge been doing?" feed. Returns significant decisions and actions, not every individual tool call.
+
+### Query Parameters
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hours` | float | 24 | Time window (e.g. `6` for last 6 hours, `48` for 2 days) |
+| `limit` | int | — | Optional cap on events returned (if omitted, returns all events in the time window) |
+| `type` | string | — | Optional filter by event type (e.g. `trade_opened`, `regime_shift`, `decision`) |
+
+### Response
+
+```json
+{
+  "events": [
+    {
+      "id": "evt_a1b2c3d4",
+      "timestamp": "2026-07-01T14:05:00.000Z",
+      "type": "trade_opened",
+      "summary": "Opened long 8.20 shares of SOFI @ $15.40 (news_momentum, confidence 70%)",
+      "metadata": {
+        "symbol": "SOFI",
+        "price": 15.40,
+        "qty": 8.2,
+        "notional": 126.28,
+        "side": "long",
+        "strategy": "news_momentum",
+        "regime": "trending_up"
+      }
+    },
+    {
+      "id": "evt_x5y6z7w8",
+      "timestamp": "2026-07-01T13:42:00.000Z",
+      "type": "regime_shift",
+      "summary": "Market regime changed from chop → trending_up (VIX 14.2, SPY 0.8%)",
+      "details": "Regime transition detected: chop → trending_up. Adjusting strategy bias accordingly.",
+      "metadata": {
+        "from": "chop",
+        "to": "trending_up",
+        "vix": 14.2,
+        "spyChange": 0.8
+      }
+    }
+  ],
+  "total": 2
+}
+```
+
+### Fields (per event)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique event ID |
+| `timestamp` | string | ISO-8601 timestamp |
+| `type` | string | One of the event types below |
+| `summary` | string | Single-line human-readable headline |
+| `details` | string\|null | 1–3 sentence expansion (optional) |
+| `metadata` | object\|null | Structured data for dashboard widgets (varies by type) |
+
+### Event Types
+
+| Type | Meaning | Example Summary |
+|------|---------|----------------|
+| `trade_opened` | Long or short position opened | `Opened long 8.2 shares of SOFI @ $15.40 (news_momentum, confidence 70%)` |
+| `trade_closed` | Position closed (sold/covered) | `Closed SOFI @ $15.58 — time stop hit` |
+| `halt` | Trading halted by guardrails | `Trading halted — 4 consecutive losses reached` |
+| `halt_lifted` | Trading resumed after halt | `Trading resumed after halt` |
+| `regime_shift` | Market regime transition detected | `Market regime changed from chop → trending_up (VIX 14.2, SPY 0.8%)` |
+| `strategy_note` | Strategy-level decision by agent | `Pausing mean_reversion — calibration shows 1-7 record in current regime` |
+| `discovery` | New tickers found via market scan | `Discovered 3 new ticker(s): SOFI, RKLB, ASTS` |
+| `briefing` | Pre-market briefing built | `Pre-market briefing built (34 lines)` |
+| `retrospective` | Daily retrospective completed | `Daily retrospective completed` |
+| `system` | Agent lifecycle event | `Agent session started — live trading` |
+| `decision` | Explicit hold / non-trade decision | `Held cash — no setups cleared threshold (best signal: MSTR at impact 3, conf 40%)` |
+
+---
+
 ## `GET /api/health`
 
 Simple health check.
@@ -361,6 +442,12 @@ curl "http://192.168.50.42:5000/api/equity-curve?days=7"
 
 # Get recent trades
 curl "http://192.168.50.42:5000/api/trades?limit=10"
+
+# Get activity stream (last 24h, default)
+curl http://192.168.50.42:5000/api/activity-stream
+
+# Get activity stream (last 6 hours, only trade openings)
+curl "http://192.168.50.42:5000/api/activity-stream?hours=6&type=trade_opened"
 
 # Health check
 curl http://192.168.50.42:5000/api/health

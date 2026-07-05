@@ -1,0 +1,399 @@
+/**
+ * Ingestion pipeline — wires all data sources to the Research DB.
+ *
+ * Every data source calls SignalStore.recordSignal() after fetching its data.
+ * Deterministic, fire-and-forget, decoupled from the agent and trading hours.
+ *
+ * This module also manages the independent research timer that runs 24/7.
+ */
+
+import { SignalStore } from "./db.js";
+import { getConfig } from "../config.js";
+import { scanYahooMarketMovers } from "../ingestion/discovery.js";
+import { fetchAllNews } from "../ingestion/expanded-news.js";
+import { fetchEdgarFilings, scoreFiling } from "../ingestion/edgar.js";
+import { scanRedditMentions } from "../ingestion/social.js";
+import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks } from "../ingestion/scanner.js";
+import { getActiveWatchlist } from "../ingestion/discovery.js";
+import { refreshFundamentals } from "./fundamentals.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GLOBAL INSTANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _store: SignalStore | null = null;
+let _watchlist: string[] = [];
+let _timerId: ReturnType<typeof setInterval> | null = null;
+let _cycleCount = 0;
+
+export function getSignalStore(): SignalStore {
+  if (!_store) throw new Error("SignalStore not initialized. Call initResearch() first.");
+  return _store;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NORMALIZATION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Classify news headline direction based on sentiment keywords.
+ * Simple heuristic — agent can override via reasoning.
+ */
+function classifyNewsDirection(headline: string, summary: string): number {
+  const text = `${headline} ${summary}`.toLowerCase();
+  const positives = ["beat", "surge", "upgrade", "buy", "positive", "growth", "record", "profit",
+    "partnership", "acquisition", "approve", "launch", "exceed", "raised guidance"];
+  const negatives = ["miss", "drop", "downgrade", "sell", "negative", "loss", "decline", "cut",
+    "layoff", "lawsuit", "investigation", "recall", "delay", "suspend", "warning"];
+
+  let score = 0;
+  for (const w of positives) { if (text.includes(w)) score++; }
+  for (const w of negatives) { if (text.includes(w)) score--; }
+  return Math.max(-1, Math.min(1, score / 3));
+}
+
+/**
+ * Classify EDGAR filing type as bullish, bearish, or neutral.
+ */
+function classifyEdgarDirection(items: string[]): number {
+  let direction = 0;
+  if (items.some((i) => i.includes("1.01"))) direction += 0.5;   // Material agreement (usually positive)
+  if (items.some((i) => i.includes("2.01"))) direction += 0.5;   // Acquisition (neutral to positive)
+  if (items.some((i) => i.includes("2.02"))) direction += 0.3;   // Financial results (neutral)
+  if (items.some((i) => i.includes("5.02"))) direction -= 0.5;   // Officer departure (usually negative)
+  return Math.max(-1, Math.min(1, direction));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA SOURCE WIRES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Wire Yahoo market movers (gainers/losers/trending).
+ */
+async function ingestYahooMovers(store: SignalStore): Promise<void> {
+  try {
+    const movers = await scanYahooMarketMovers(50);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const g of movers.gainers) {
+      signals.push({
+        ticker: g.symbol,
+        source: "yahoo_mover",
+        score: Math.min(1.0, Math.abs(g.changePct) / 50),
+        direction: g.changePct > 0 ? 1 : -1,
+        payload: { type: "gainer", changePct: g.changePct, price: g.price },
+      });
+    }
+
+    for (const l of movers.losers) {
+      signals.push({
+        ticker: l.symbol,
+        source: "yahoo_mover",
+        score: Math.min(1.0, Math.abs(l.changePct) / 50),
+        direction: -1,
+        payload: { type: "loser", changePct: l.changePct, price: l.price },
+      });
+    }
+
+    for (const t of movers.trending) {
+      if (!signals.some((s) => s.ticker === t.symbol)) {
+        signals.push({
+          ticker: t.symbol,
+          source: "yahoo_mover",
+          score: 0.4,
+          direction: 0,
+          payload: { type: "trending" },
+        });
+      }
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Yahoo movers ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire Alpaca news headlines.
+ */
+async function ingestAlpacaNews(store: SignalStore): Promise<void> {
+  try {
+    const news = await fetchAllNews(20);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const item of news) {
+      if (item.symbols.length === 0) continue;
+      const direction = classifyNewsDirection(item.headline, item.summary);
+      const score = 0.5 + Math.abs(direction) * 0.3; // 0.5-0.8 depending on sentiment strength
+
+      for (const sym of item.symbols) {
+        signals.push({
+          ticker: sym,
+          source: "alpaca_news",
+          score: Math.min(1.0, score),
+          direction,
+          payload: { headline: item.headline.slice(0, 200), summary: item.summary.slice(0, 300), source: item.source },
+        });
+      }
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Alpaca news ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire EDGAR 8-K filings.
+ */
+async function ingestEdgarFilings(store: SignalStore): Promise<void> {
+  try {
+    const filings = await fetchEdgarFilings(_watchlist);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const f of filings) {
+      const { score } = scoreFiling(f);
+      const direction = classifyEdgarDirection(f.items);
+      const ticker = f.ticker || "UNKNOWN";
+
+      signals.push({
+        ticker,
+        source: "edgar",
+        score: score / 10,
+        direction,
+        payload: {
+          companyName: f.companyName,
+          items: f.items,
+          filingDate: f.filingDate,
+          cik: f.cik,
+        },
+      });
+
+      // Also record as corporate event
+      store.recordCorporateEvent({
+        ticker,
+        eventDate: f.filingDate,
+        eventType: "sec_filing",
+        impact: score / 10,
+        details: { items: f.items, companyName: f.companyName },
+        sourceUrl: f.link,
+      });
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] EDGAR ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire Reddit mention velocity.
+ */
+async function ingestRedditMentions(store: SignalStore): Promise<void> {
+  try {
+    const scans = await scanRedditMentions(_watchlist);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const s of scans) {
+      signals.push({
+        ticker: s.symbol,
+        source: "reddit",
+        score: Math.min(1.0, s.velocity / 5),
+        direction: 0,
+        payload: { velocity: s.velocity, mentionsLastHour: s.mentionsLastHour, totalMentions: s.totalMentions },
+      });
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Reddit ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire volume standouts.
+ */
+async function ingestVolumeScans(store: SignalStore): Promise<void> {
+  try {
+    const scans = await scanRelativeVolume(_watchlist);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const s of scans) {
+      signals.push({
+        ticker: s.symbol,
+        source: "volume_spike",
+        score: Math.min(1.0, s.relativeVolume / 10),
+        direction: s.changePct > 0 ? 1 : -1,
+        payload: { relativeVolume: s.relativeVolume, changePct: s.changePct, price: s.currentPrice, regime: s.regime },
+      });
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Volume scan ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire pre-market gaps.
+ */
+async function ingestPreMarketGaps(store: SignalStore): Promise<void> {
+  try {
+    const gaps = await scanPreMarketGaps(_watchlist);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const g of gaps) {
+      signals.push({
+        ticker: g.symbol,
+        source: "gap",
+        score: Math.min(1.0, Math.abs(g.gapPct) / 10),
+        direction: g.gapPct > 0 ? 1 : -1,
+        payload: { gapPct: g.gapPct, priorClose: g.priorClose, price: g.preMarketPrice },
+      });
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Pre-market gap ingest failed:", e.message);
+  }
+}
+
+/**
+ * Wire range break scans.
+ */
+async function ingestRangeBreaks(store: SignalStore): Promise<void> {
+  try {
+    const breaks = await scanRangeBreaks(_watchlist);
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    for (const b of breaks) {
+      const nearTop = b.positionInRange > 0.9;
+      signals.push({
+        ticker: b.symbol,
+        source: "range_break",
+        score: Math.min(1.0, Math.abs(b.positionInRange - 0.5) * 3),
+        direction: nearTop ? 1 : -1,
+        payload: { positionInRange: b.positionInRange, price: b.price, high20d: b.high20d, low20d: b.low20d },
+      });
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Range break ingest failed:", e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESEARCH TIMER — Runs on its own schedule, independent of trading hours/agent
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PRUNE_INTERVAL_CYCLES = 60;   // Every 60 ticks (~30 min at 30s poll)
+const FUNDAMENTALS_INTERVAL_MS = 24 * 60 * 60_000; // Daily
+
+let _lastFundamentalsTime = 0;
+
+/**
+ * One tick of the research loop — fires every `pollIntervalMs`.
+ * Fetches ALL data sources and writes to the signal store.
+ */
+async function researchTick(): Promise<void> {
+  const store = getSignalStore();
+  _cycleCount++;
+
+  // Fire all data sources in parallel — each has individual error handling
+  await Promise.allSettled([
+    ingestYahooMovers(store),
+    ingestAlpacaNews(store),
+    ingestEdgarFilings(store),
+    ingestRedditMentions(store),
+    ingestVolumeScans(store),
+    ingestPreMarketGaps(store),
+    ingestRangeBreaks(store),
+  ]);
+
+  // Prune old data every N cycles
+  if (_cycleCount % PRUNE_INTERVAL_CYCLES === 0) {
+    const { rawDeleted, hourlyDeleted, dailyDeleted } = store.prune();
+    if (rawDeleted + hourlyDeleted + dailyDeleted > 0) {
+      console.log(`[RESEARCH] Pruned: ${rawDeleted} raw, ${hourlyDeleted} hourly, ${dailyDeleted} daily`);
+    }
+  }
+
+  // Refresh fundamentals daily
+  const now = Date.now();
+  if (now - _lastFundamentalsTime > FUNDAMENTALS_INTERVAL_MS) {
+    _lastFundamentalsTime = now;
+    try {
+      await refreshFundamentals(store, _watchlist);
+      console.log("[RESEARCH] Fundamentals refreshed");
+    } catch (e: any) {
+      console.warn("[RESEARCH] Fundamentals refresh failed:", e.message);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Initialize the research engine.
+ * Creates/finds the SQLite DB, starts the independent research timer.
+ * Returns the SignalStore instance.
+ */
+export async function initResearch(dbPath: string, watchlist: string[]): Promise<SignalStore> {
+  if (_store) {
+    console.warn("[RESEARCH] Already initialized. Returning existing store.");
+    return _store;
+  }
+
+  _watchlist = watchlist;
+  const store = new SignalStore(dbPath);
+  await store.init();
+  _store = store;
+
+  const cfg = getConfig();
+  const interval = cfg.pollIntervalMs;
+
+  console.log(`[RESEARCH] Database at ${dbPath} — ${store.getTableInfo().length} tables ready`);
+  console.log(`[RESEARCH] Timer: every ${(interval / 1000).toFixed(0)}s, prune every ${PRUNE_INTERVAL_CYCLES} ticks`);
+
+  // Start the independent research timer
+  _timerId = setInterval(researchTick, interval);
+
+  // Fire immediate first tick
+  researchTick().catch((e) => console.warn("[RESEARCH] Initial tick failed:", e.message));
+
+  return store;
+}
+
+/**
+ * Stop the research timer. Call on shutdown.
+ */
+export function stopResearch(): void {
+  if (_timerId) {
+    clearInterval(_timerId);
+    _timerId = null;
+  }
+  if (_store) {
+    _store.flush();
+  }
+}
+
+/**
+ * Force a single research tick (useful for testing or manual trigger).
+ */
+export async function triggerResearchTick(): Promise<void> {
+  await researchTick();
+}

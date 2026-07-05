@@ -1,13 +1,26 @@
 /**
- * Deterministic risk guardrails.
- * The agent proposes; the guardrails dispose.
+ * Minimal risk guardrails.
  *
- * EXIT PHILOSOPHY:
- * - LOSERS: Cut quickly. Time stop (30 min) if not profitable. Hard stop (3%) always active.
- * - WINNERS: Let them run. Once +1% profit, activate trailing stop (5% below peak).
- *   Hold for days/weeks until trailing stop hits or manual exit.
+ * Philosophy: Scrooge is an intelligent portfolio manager. The only things we
+ * enforce deterministically are the position-level safety stops (so the bot
+ * doesn't blow up between cycles). Everything else — sizing, position count,
+ * risk per trade, daily loss limits — is the agent's domain.
  *
- * ALL VALUES are read from config.yaml (or env overrides).
+ * KEPT (position-level safety):
+ * - Hard stop loss (3% from entry)
+ * - Trailing stop (5% below peak for longs, 5% above trough for shorts)
+ * - Green threshold (+1% promotes to trailing, cancels time stop)
+ * - Short squeeze protection (cover if price jumps 5% intraday)
+ *
+ * REMOVED (agent's domain):
+ * - Max position % of account
+ * - Max open positions
+ * - Max daily loss %
+ * - Consecutive losses halt
+ * - Min impact score / confidence thresholds
+ * - Mean reversion hard block in trending_up
+ * - Cooldown between trades on same ticker
+ * - Short sizing reduction in uptrends
  */
 
 import { getConfig } from "../config.js";
@@ -27,6 +40,7 @@ export function evaluateBuySignal(params: {
   signal: {
     symbol: string;
     direction: string;
+    strategy: string;
     impactScore: number;
     confidence: number;
     suggestedSizePct: number;
@@ -42,69 +56,29 @@ export function evaluateBuySignal(params: {
 }): RiskCheckResult {
   const cfg = getConfig();
 
-  // 1. Direction — now supports both "long" and "short"
+  // 1. Direction validation
   if (params.signal.direction !== "long" && params.signal.direction !== "short") {
     return { allowed: false, size: 0, reason: `Unsupported direction: ${params.signal.direction}. Only 'long' or 'short' allowed.` };
   }
 
-  const isShort = params.signal.direction === "short";
-
-  // 2. Impact & confidence
-  // Phase 2: Calibration override — if we have 5+ trades in this (strategy, regime), use actual win rate
-  const effectiveConfidence = params.calibrationOverride ?? params.signal.confidence;
-  if (params.calibrationOverride !== null && params.calibrationOverride !== undefined) {
-    console.log(`[CALIBRATION] ${params.signal.symbol}: LLM confidence ${params.signal.confidence.toFixed(2)} overridden by historical win rate ${params.calibrationOverride.toFixed(2)} in ${params.currentRegime ?? "unknown"} regime`);
-  }
-
-  if (Math.abs(params.signal.impactScore) < cfg.signal.minImpactScore) {
-    return {
-      allowed: false,
-      size: 0,
-      reason: `Impact ${params.signal.impactScore} below threshold ${cfg.signal.minImpactScore}`,
-    };
-  }
-
-  if (effectiveConfidence < cfg.signal.minConfidence) {
-    return {
-      allowed: false,
-      size: 0,
-      reason: `Confidence ${effectiveConfidence.toFixed(2)} below threshold ${cfg.signal.minConfidence}${params.calibrationOverride !== null ? " (calibrated)" : ""}`,
-    };
-  }
-
-  // 3. Already in position (same ticker regardless of direction)
+  // 2. Already in position (same ticker regardless of direction)
   if (params.openPositions.some((p) => p.symbol === params.signal.symbol)) {
     return { allowed: false, size: 0, reason: `Already holding ${params.signal.symbol}` };
   }
 
-  // 4. Position limit
-  if (params.openPositions.length >= cfg.risk.maxOpenPositions) {
-    return { allowed: false, size: 0, reason: `Max ${cfg.risk.maxOpenPositions} open positions reached` };
+  // 3. Minimum trade size (Alpaca fractional share minimum)
+  if (params.settledCash < 5) {
+    return { allowed: false, size: 0, reason: `Insufficient settled cash: $${params.settledCash.toFixed(2)}` };
   }
 
-  // 5. Daily loss halt
-  const dailyLossLimit = -(params.accountValue * cfg.risk.maxDailyLossPct);
-  if (params.dailyPnL <= dailyLossLimit) {
-    return { allowed: false, size: 0, reason: `Daily loss limit reached: $${params.dailyPnL.toFixed(2)}` };
-  }
-
-  // 6. Sizing — shorts use same max position % but may be reduced in volatile/trending_up regimes
-  let maxDollar = params.accountValue * cfg.risk.maxPositionPct;
-  if (isShort && params.currentRegime === "trending_up") {
-    // Reduce short size in uptrends (higher squeeze risk)
-    maxDollar = maxDollar * 0.5;
-  }
-  const suggestedDollar = params.accountValue * params.signal.suggestedSizePct;
-  const available = Math.min(maxDollar, suggestedDollar, params.settledCash);
-
-  if (available < 5) {
-    return { allowed: false, size: 0, reason: `Insufficient settled cash: $${available.toFixed(2)}` };
-  }
+  // Agent sizes based on its own conviction. We just pass through.
+  const suggestedSize = params.accountValue * params.signal.suggestedSizePct;
+  const size = Math.min(suggestedSize, params.settledCash);
 
   return {
     allowed: true,
-    size: Math.round(available * 100) / 100,
-    reason: isShort ? `PASS (short, sized ${(available / params.accountValue * 100).toFixed(0)}%)` : "PASS",
+    size: Math.round(size * 100) / 100,
+    reason: "PASS",
   };
 }
 
@@ -224,7 +198,6 @@ function checkShortExitConditions(
   // 2. Squeeze protection: rapid intraday move against short
   const squeezeStop = Math.round(pos.entryPrice * (1 + cfg.risk.shortSqueezeThreshold) * 100) / 100;
   if (price >= squeezeStop) {
-    // Only trigger if status is still initial (no profit yet)
     if (pos.status === "initial") {
       return { shouldExit: true, reason: `Squeeze protection triggered at $${price.toFixed(2)} (threshold: $${squeezeStop.toFixed(2)}). Covering short.` };
     }
@@ -235,8 +208,6 @@ function checkShortExitConditions(
 
   // 3. Check if short has gone "green" (price dropped enough)
   if (profitPct >= cfg.risk.greenThreshold && pos.status === "initial") {
-    // Promote — time stop cancelled, set trailing stop (on the LOW side for shorts)
-    // For shorts: trailing stop is triggered when price rises back up from the low
     const initialTrailing = Math.round(price * (1 + cfg.risk.trailingStopPct) * 100) / 100;
     return {
       shouldExit: false,
@@ -250,7 +221,6 @@ function checkShortExitConditions(
   // 4. Update trailing stop if already green/trailing
   if (pos.status === "green" || pos.status === "trailing") {
     const lowest = Math.min(pos.lowestPrice || pos.entryPrice, price);
-    // Trailing stop for shorts: if price rises back up from the low
     const trailing = Math.round(lowest * (1 + cfg.risk.trailingStopPct) * 100) / 100;
 
     if (price >= trailing) {

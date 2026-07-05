@@ -6,6 +6,8 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
+import { getAccount } from "../execution/alpaca.js";
+import { getTradingDate } from "../config.js";
 import type {
   Position,
   TradeRecord,
@@ -17,6 +19,8 @@ import type {
   DailyTokenCost,
   DailyReport,
   Lesson,
+  ActivityEvent,
+  ActivityEventType,
 } from "../types.js";
 
 const DATA_DIR = join(process.cwd(), "data");
@@ -50,7 +54,7 @@ export class PortfolioState {
       cash: capital,
       settledCash: capital,
       dailyPnL: 0,
-      today: new Date().toISOString().slice(0, 10),
+      today: getTradingDate(),
       positions: [],
       tradeHistory: [],
       portfolioHistory: [],
@@ -71,6 +75,7 @@ export class PortfolioState {
       sessionInputCost: 0,
       sessionOutputCost: 0,
       dailyReports: [],
+      activityStream: [],
     };
   }
 
@@ -80,11 +85,17 @@ export class PortfolioState {
     if (!this.state.calibrationTable) this.state.calibrationTable = [];
     if (!this.state.vectorMemory) this.state.vectorMemory = [];
     if (!this.state.dailyReports) this.state.dailyReports = [];
+    if (!this.state.activityStream) this.state.activityStream = [];
     if (!this.state.tokenCosts) this.state.tokenCosts = [];
     if (this.state.sessionInputTokens === undefined) this.state.sessionInputTokens = 0;
     if (this.state.sessionOutputTokens === undefined) this.state.sessionOutputTokens = 0;
     if (this.state.sessionInputCost === undefined) this.state.sessionInputCost = 0;
     if (this.state.sessionOutputCost === undefined) this.state.sessionOutputCost = 0;
+    // Backwards compat: migrate old string-format lessons to Lesson objects
+    if (this.state.memory?.lessons) {
+      this.state.memory.lessons = this.state.memory.lessons
+        .filter((l) => typeof l === 'object' && l !== null) as Lesson[];
+    }
     // Backwards compat: add direction and lowestPrice to existing positions
     for (const pos of this.state.positions) {
       if (!pos.direction) pos.direction = "long";
@@ -93,7 +104,7 @@ export class PortfolioState {
   }
 
   private resetDailyIfNeeded() {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTradingDate();
     if (this.state.today !== today) {
       // Finalize previous day's token costs into history
       if (this.state.sessionInputTokens > 0 || this.state.sessionOutputTokens > 0) {
@@ -126,7 +137,7 @@ export class PortfolioState {
     }
   }
 
-  private save() {
+  save() {
     writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
   }
 
@@ -175,7 +186,7 @@ export class PortfolioState {
   // SNAPSHOT — Equity curve data for dashboards
   // ═══════════════════════════════════════════════════════════════════════
 
-  addSnapshot(vix: number | null, regime: string) {
+  addSnapshot(vix: number | null, regime: string, alpacaEquity?: number | null) {
     const unrealized = this.state.positions.reduce(
       (sum, p) => sum + (p.unrealizedPnL || 0),
       0
@@ -185,9 +196,18 @@ export class PortfolioState {
       0
     );
 
+    let totalEquity: number;
+    if (alpacaEquity != null && alpacaEquity > 0) {
+      // Use Alpaca's official equity from /v2/account (accurate — includes fees, dividends, settled trades)
+      totalEquity = Math.round(alpacaEquity * 100) / 100;
+    } else {
+      // Fallback: calculate from internal state
+      totalEquity = Math.round((this.state.cash + openNotional + unrealized) * 100) / 100;
+    }
+
     const snap: PortfolioSnapshot = {
       timestamp: new Date().toISOString(),
-      totalEquity: Math.round((this.state.cash + openNotional + unrealized) * 100) / 100,
+      totalEquity,
       cash: this.state.cash,
       settledCash: this.state.settledCash,
       positionsCount: this.state.positions.length,
@@ -584,12 +604,58 @@ export class PortfolioState {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // ACTIVITY STREAM — Dashboard event log
+  // ═══════════════════════════════════════════════════════════════════════
+
+  recordActivity(
+    type: ActivityEventType,
+    summary: string,
+    options?: {
+      details?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): ActivityEvent {
+    const event: ActivityEvent = {
+      id: `evt_${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 14)}`,
+      timestamp: new Date().toISOString(),
+      type,
+      summary,
+      details: options?.details,
+      metadata: options?.metadata,
+    };
+    this.state.activityStream.push(event);
+    // Keep last 500 events
+    if (this.state.activityStream.length > 500) {
+      this.state.activityStream = this.state.activityStream.slice(-400);
+    }
+    this.save();
+    return event;
+  }
+
+  /** Get activity stream events in reverse chronological order. */
+  getActivityStream(limit: number = 50): ActivityEvent[] {
+    return [...this.state.activityStream].reverse().slice(0, limit);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // HALT / LESSONS
   // ═══════════════════════════════════════════════════════════════════════
 
   halt(reason: string) {
     this.state.halted = true;
     this.state.haltReason = reason;
+    this.recordActivity("halt", `Trading halted — ${reason}`);
+    this.save();
+  }
+
+  /** Lift the trading halt. */
+  unhalt() {
+    const wasHalted = this.state.halted;
+    this.state.halted = false;
+    this.state.haltReason = null;
+    if (wasHalted) {
+      this.recordActivity("halt_lifted", "Trading resumed after halt");
+    }
     this.save();
   }
 
@@ -598,6 +664,14 @@ export class PortfolioState {
    * This is NOT additive. The LLM receives existing lessons + new data and returns
    * an evolved set — some merged, some modified, some removed, some new.
    */
+  addLesson(lesson: Lesson | string) {
+    const entry: Lesson = typeof lesson === "string"
+      ? { id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), category: "manual", insight: lesson, weight: 0.5, reinforcementCount: 0, lastReinforcedAt: new Date().toISOString(), createdAt: new Date().toISOString(), deprecated: false, featureVector: [] }
+      : lesson;
+    this.state.memory.lessons.push(entry);
+    this.save();
+  }
+
   replaceAllLessons(lessons: Lesson[]) {
     this.state.memory.lessons = lessons;
     this.state.memory.lastReflection = new Date().toISOString();
@@ -607,7 +681,7 @@ export class PortfolioState {
   /** Get lessons that are active (not deprecated), sorted by weight descending. */
   getActiveLessons(): Lesson[] {
     return this.state.memory.lessons
-      .filter((l) => !l.deprecated)
+      .filter((l): l is Lesson => typeof l === 'object' && l !== null && !l.deprecated)
       .sort((a, b) => b.weight - a.weight);
   }
 
@@ -618,9 +692,11 @@ export class PortfolioState {
 
     const lines = ["📚 ACTIVE LESSONS (from retrospective analysis):"];
     for (const l of active.slice(0, 5)) {
+      // Safety: guard against legacy string-format lessons that might slip through
+      if (typeof l !== 'object' || l === null) continue;
       const stars = l.weight >= 0.8 ? "🔴" : l.weight >= 0.5 ? "🟡" : "🟢";
       const ctx = l.context ? ` [${l.context}]` : "";
-      lines.push(`  ${stars} [${l.category}]${ctx} ${l.insight.slice(0, 150)}${l.reinforcementCount > 1 ? ` (confirmed ${l.reinforcementCount}x)` : ""}`);
+      lines.push(`  ${stars} [${l.category}]${ctx} ${(l.insight || "").slice(0, 150)}${l.reinforcementCount > 1 ? ` (confirmed ${l.reinforcementCount}x)` : ""}`);
     }
     if (active.length > 5) {
       lines.push(`  ... and ${active.length - 5} more lessons (use consult_memory to search all)`);
@@ -796,7 +872,7 @@ export class PortfolioState {
   }
 
   getDailyTokenCost(date?: string): DailyTokenCost | null {
-    const target = date ?? new Date().toISOString().slice(0, 10);
+    const target = date ?? getTradingDate();
     const entry = this.state.tokenCosts.find(c => c.date === target);
     if (entry) return entry;
     // If it's today and not finalized yet, return current session
@@ -839,6 +915,27 @@ export class PortfolioState {
   /** Get portfolio snapshots for a specific date. */
   getSnapshotsForDay(date: string): PortfolioSnapshot[] {
     return this.state.portfolioHistory.filter((s) => s.timestamp.slice(0, 10) === date);
+  }
+
+  /** Get the full portfolio snapshot history (all dates). */
+  getSnapshotHistory(): PortfolioSnapshot[] {
+    return this.state.portfolioHistory;
+  }
+
+  /** Fetch current total account equity from Alpaca. Falls back to internal calculation on error. */
+  async getAccountEquity(): Promise<number> {
+    try {
+      const account = await getAccount();
+      if (account.equity != null && account.equity > 0) {
+        return Math.round(account.equity * 100) / 100;
+      }
+    } catch {
+      // fall through to internal calculation
+    }
+    // Fallback: compute from internal state
+    const openNotional = this.state.positions.reduce((s, p) => s + p.notional, 0);
+    const unrealizedPnL = this.state.positions.reduce((s, p) => s + (p.unrealizedPnL || 0), 0);
+    return Math.round((this.state.cash + openNotional + unrealizedPnL) * 100) / 100;
   }
 
   /** Save a daily retrospective report. */

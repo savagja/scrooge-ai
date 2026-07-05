@@ -21,19 +21,12 @@ interface AppConfig {
     refreshIntervalCycles: number;
   };
   risk: {
-    maxPositionPct: number;
-    maxDailyLossPct: number;
     stopLossPct: number;
     trailingStopPct: number;
     greenThreshold: number;
     shortSqueezeThreshold: number;
-    cooldownMinutes: number;
-    consecutiveLossesHalt: number;
-    maxOpenPositions: number;
   };
   signal: {
-    minImpactScore: number;
-    minConfidence: number;
     holdMinutes: number;
   };
   execution: {
@@ -52,6 +45,15 @@ interface AppConfig {
     thinkingLevel: string;
     maxToolCallsPerTurn: number;
     enableReflection: boolean;
+  };
+  research: {
+    enabled: boolean;
+    dbPath: string;
+    rawRetentionDays: number;
+    hourlyRetentionDays: number;
+    dailyRetentionDays: number;
+    pruneIntervalCycles: number;
+    fundamentalsRefreshHours: number;
   };
 }
 
@@ -110,19 +112,12 @@ function loadConfig(): AppConfig {
       refreshIntervalCycles: num("DISCOVERY_REFRESH", ["discovery", "refresh_interval_cycles"], 3),
     },
     risk: {
-      maxPositionPct: num("MAX_POSITION_PCT", ["risk", "max_position_pct"], 0.30),
-      maxDailyLossPct: num("MAX_DAILY_LOSS_PCT", ["risk", "max_daily_loss_pct"], 0.15),
       stopLossPct: num("STOP_LOSS_PCT", ["risk", "stop_loss_pct"], 0.03),
       trailingStopPct: num("TRAILING_STOP_PCT", ["risk", "trailing_stop_pct"], 0.05),
       greenThreshold: num("GREEN_THRESHOLD", ["risk", "green_threshold"], 0.01),
       shortSqueezeThreshold: num("SHORT_SQUEEZE_THRESHOLD", ["risk", "short_squeeze_threshold"], 0.05),
-      cooldownMinutes: num("COOLDOWN_MINUTES", ["risk", "cooldown_minutes"], 3),
-      consecutiveLossesHalt: num("CONSECUTIVE_LOSSES_HALT", ["risk", "consecutive_losses_halt"], 4),
-      maxOpenPositions: num("MAX_OPEN_POSITIONS", ["risk", "max_open_positions"], 4),
     },
     signal: {
-      minImpactScore: num("MIN_IMPACT_SCORE", ["signal", "min_impact_score"], 4),
-      minConfidence: num("MIN_CONFIDENCE", ["signal", "min_confidence"], 0.45),
       holdMinutes: num("HOLD_MINUTES", ["signal", "hold_minutes"], 30),
     },
     execution: {
@@ -142,6 +137,15 @@ function loadConfig(): AppConfig {
       maxToolCallsPerTurn: num("MAX_TOOL_CALLS", ["agent", "max_tool_calls_per_turn"], 6),
       enableReflection: bool("ENABLE_REFLECTION", ["agent", "enable_reflection"], false),
     },
+    research: {
+      enabled: bool("RESEARCH_ENABLED", ["research", "enabled"], true),
+      dbPath: str("RESEARCH_DB_PATH", ["research", "db_path"], "data/research.db"),
+      rawRetentionDays: num("RESEARCH_RAW_RETENTION", ["research", "raw_retention_days"], 14),
+      hourlyRetentionDays: num("RESEARCH_HOURLY_RETENTION", ["research", "hourly_retention_days"], 90),
+      dailyRetentionDays: num("RESEARCH_DAILY_RETENTION", ["research", "daily_retention_days"], 365),
+      pruneIntervalCycles: num("RESEARCH_PRUNE_INTERVAL", ["research", "prune_interval_cycles"], 60),
+      fundamentalsRefreshHours: num("RESEARCH_FUNDAMENTALS_REFRESH", ["research", "fundamentals_refresh_hours"], 24),
+    },
   };
 }
 
@@ -155,4 +159,21 @@ export function getConfig(): AppConfig {
 export function reloadConfig(): AppConfig {
   _config = loadConfig();
   return _config;
+}
+
+/**
+ * Get the current trading date (US/Eastern timezone).
+ * All date-sensitive decisions (daily P&L reset, snapshots, reports) use this.
+ */
+export function getTradingDate(): string {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    return formatter.format(new Date()); // returns YYYY-MM-DD
+  } catch {
+    // Fallback: UTC (better than nothing)
+    return new Date().toISOString().slice(0, 10);
+  }
 }

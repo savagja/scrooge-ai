@@ -14,10 +14,10 @@
     "@earendil-works/pi-coding-agent": "latest",
     "@sinclair/typebox": "^0.32.0",
     "dotenv": "^16.4.0",
-    "yaml": "^2.4.0",
     "fast-xml-parser": "^4.5.0",
+    "sql.js": "^1.14.1",
     "tsx": "^4.0.0",
-    "typescript": "^5.4.0"
-  },
-  "devDependencies": {}
+    "typescript": "^5.4.0",
+    "yaml": "^2.4.0"
+  }
 }

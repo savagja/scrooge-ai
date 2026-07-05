@@ -33,26 +33,20 @@ discovery:
   refresh_interval_cycles: 3  # Re-discover every N cycles
 
 # ─── Risk Parameters ──────────────────────────────────────────
+# Safety rules only. Sizing, limits, and strategy are the agent's domain.
 risk:
-  max_position_pct: 0.30        # Max % of account per trade (0.30 = 30%)
-  max_daily_loss_pct: 0.15      # Halt trading after losing this % of account
-  stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry (applies to both longs and shorts)
-  trailing_stop_pct: 0.05       # For winners: exit if price drops 5% from peak (longs) or rises 5% from trough (shorts)
-  green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop
-  short_squeeze_threshold: 0.05 # For shorts: exit if price rises 5% intraday from entry (squeeze protection)
-  cooldown_minutes: 3           # Minimum minutes between trades on same ticker
-  consecutive_losses_halt: 4    # Halt after this many consecutive losses
-  max_open_positions: 4         # Max positions held simultaneously
+  stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry
+  trailing_stop_pct: 0.05       # Winners: exit if price drops 5% from peak (longs) or rises 5% from trough (shorts)
+  green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop, cancel time stop
+  short_squeeze_threshold: 0.05 # Shorts: exit if price rises 5% intraday from entry
 
 # ─── Signal Filters ───────────────────────────────────────────
 signal:
-  min_impact_score: 4           # Lowered from 6 — the LLM analysis model is already skeptical; 4 is a reasonable action threshold
-  min_confidence: 0.45          # Lowered from 0.60 — double-skepticism trap reduced
   hold_minutes: 30              # Initial time stop: 30 min to prove itself
 
 # ─── Execution ────────────────────────────────────────────────
 execution:
-  dry_run: true                 # Set to false for live/paper trading. Keep true for first deploy test.
+  dry_run: false                # Set to false for live/paper trading. Keep true for first deploy test.
   fractional_enabled: true    # Alpaca fractional shares (must stay true for small account)
   default_time_in_force: day    # day, ioc, fok
 
@@ -69,3 +63,13 @@ agent:
   thinking_level: medium      # off, minimal, low, medium, high, xhigh
   max_tool_calls_per_turn: 6   # Reduced from 12 — agent gets pre-digested context now, needs fewer calls
   enable_reflection: false       # Disabled — saves tokens. Manual reflect_on_performance still available
+
+# ─── Research Engine ──────────────────────────────────────────
+research:
+  enabled: true               # Set false to disable entirely (saves bandwidth/API calls)
+  db_path: data/research.db   # SQLite database location
+  raw_retention_days: 14       # Keep raw signal events for 14 days
+  hourly_retention_days: 90    # Hourly aggregates for 90 days
+  daily_retention_days: 365    # Daily aggregates for 365 days
+  prune_interval_cycles: 60    # Prune old data every N research ticks
+  fundamentals_refresh_hours: 24 # Refresh fundamentals every N hours

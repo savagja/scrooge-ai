@@ -26,6 +26,8 @@ function coerceNumber(val: unknown, fallback: number): number {
 // Use Any() to bypass strict TypeBox validation — coerceNumber handles types at runtime
 const NumStr = Type.Any();
 
+import { getSignalStore } from "../research/index.js";
+
 import { fetchNews } from "../ingestion/news.js";
 import { fetchAllNews } from "../ingestion/expanded-news.js";
 import { getVix, getSpyChange, getPrice } from "../ingestion/market.js";
@@ -41,7 +43,6 @@ import {
 } from "../ingestion/scanner.js";
 import { scanRedditMentions, getRedditHot } from "../ingestion/social.js";
 import { discoverOpportunities, getActiveWatchlist } from "../ingestion/discovery.js";
-import { analyzeNews } from "./analysis.js";
 import {
   getAccount,
   submitOrder,
@@ -49,6 +50,7 @@ import {
   closeAllPositions,
   getCurrentPrice,
   getClock,
+  buildTickerContext,
 } from "../execution/alpaca.js";
 import { PortfolioState } from "../state/portfolio.js";
 import { evaluateBuySignal, getExitPlan, checkExitConditions } from "../risk/guardrails.js";
@@ -126,9 +128,9 @@ export const fetchMarketDataTool = defineTool({
       `- Active Watchlist: ${_watchlist.length} seed + ${_discovered.length} discovered`,
       `- Breadth: ${breadth}`,
       `- Regime: ${regime}`,
-      `- Risk Settings: 30% max pos, 3% stop, 30-min hold, 4-loss halt`,
+      `- Risk Settings: 3% hard stop, 5% trailing stop, 30-min time stop, squeeze protection at 5%`,
       "",
-      regime === "trending_up" ? "Low vol uptrend. Momentum favored. Mean-reversion dangerous."
+      regime === "trending_up" ? "Uptrend. Consider momentum plays or shorts on overextended names with catalysts."
         : regime === "trending_down" ? "Downtrend. Cash is king. Only high-conviction setups."
           : regime === "volatile" ? "High volatility. Size down or hold cash."
             : "Choppy, range-bound. Mean-reversion favored. Breakouts often fake.",
@@ -159,7 +161,7 @@ export const fetchNewsTool = defineTool({
     if (news.length === 0) {
       return {
         content: [{ type: "text", text: "No fresh headlines for watchlist in last 5 minutes." }],
-        details: { count: 0 },
+        details: { count: 0, items: [] },
       };
     }
 
@@ -192,7 +194,7 @@ export const fetchAllNewsTool = defineTool({
     if (news.length === 0) {
       return {
         content: [{ type: "text", text: "No fresh headlines in last 5 minutes." }],
-        details: { count: 0 },
+        details: { count: 0, items: [] },
       };
     }
 
@@ -227,7 +229,7 @@ export const fetchEdgarFilingsTool = defineTool({
     if (filings.length === 0) {
       return {
         content: [{ type: "text", text: "No new 8-K filings in the last poll." }],
-        details: { count: 0 },
+        details: { count: 0, filings: [] },
       };
     }
 
@@ -272,7 +274,7 @@ export const scanRelativeVolumeTool = defineTool({
     if (scans.length === 0) {
       return {
         content: [{ type: "text", text: "No volume data available for watchlist." }],
-        details: { count: 0 },
+        details: { count: 0, scans: [] },
       };
     }
 
@@ -321,7 +323,7 @@ export const scanPreMarketGapsTool = defineTool({
     if (gaps.length === 0) {
       return {
         content: [{ type: "text", text: "No significant gaps (>1.5%) on watchlist." }],
-        details: { count: 0 },
+        details: { count: 0, gaps: [] },
       };
     }
 
@@ -366,7 +368,7 @@ export const scanRangeBreaksTool = defineTool({
     if (breaks.length === 0) {
       return {
         content: [{ type: "text", text: "No tickers near 20-day range extremes." }],
-        details: { count: 0 },
+        details: { count: 0, breaks: [] },
       };
     }
 
@@ -410,7 +412,7 @@ export const scanRedditTool = defineTool({
     if (scans.length === 0) {
       return {
         content: [{ type: "text", text: "No significant Reddit mentions for watchlist." }],
-        details: { count: 0 },
+        details: { count: 0, scans: [] },
       };
     }
 
@@ -457,11 +459,12 @@ export const discoverOpportunitiesTool = defineTool({
   execute: async (_id, params) => {
     const seed = _watchlist;
     const { discovered, sourceCounts } = await discoverOpportunities(seed, coerceNumber(params.maxResults, 15));
+    const state = requireState();
 
     if (discovered.length === 0) {
       return {
         content: [{ type: "text", text: "No new opportunities discovered. Your seed watchlist may be the best set." }],
-        details: { discovered: 0 },
+        details: { discovered: [] as any[], sourceCounts: {} as Record<string, number> },
       };
     }
 
@@ -484,6 +487,11 @@ export const discoverOpportunitiesTool = defineTool({
     lines.push(
       "💡 Next step: Run scan_relative_volume, trade_news_momentum, or trade_mean_reversion on any of these."
     );
+
+    state.recordActivity("discovery", `Discovered ${discovered.length} new ticker(s): ${discovered.slice(0, 5).map(d => d.symbol).join(", ")}${discovered.length > 5 ? ` +${discovered.length - 5} more` : ""}`, {
+      details: `Sources: ${Object.entries(sourceCounts).map(([k, v]) => `${k}=${v}`).join(", ")}`,
+      metadata: { count: discovered.length, tickers: discovered.map(d => d.symbol), sources: sourceCounts },
+    });
 
     return {
       content: [{ type: "text", text: lines.join("\n") }],
@@ -522,9 +530,11 @@ export const checkPortfolioTool = defineTool({
     if (portfolio.positions.length > 0) {
       lines.push("");
       for (const p of portfolio.positions) {
+        const dirLabel = p.direction === "short" ? "SHORT" : "LONG";
+        const thesisNote = `[${p.strategy}] via ${p.entrySignalSource} (${p.entryRegime} regime, ${(p.entrySignalConfidence * 100).toFixed(0)}% conf)`;
         lines.push(
-          `  [${p.symbol}] ${p.qty.toFixed(4)} @ $${p.entryPrice.toFixed(2)} ` +
-          `(unrealized: $${p.unrealizedPnL.toFixed(2)}) | Strategy: ${p.strategy}`
+          `  [${p.symbol}] ${dirLabel} ${p.qty.toFixed(4)} @ $${p.entryPrice.toFixed(2)} ` +
+          `(unrealized: $${p.unrealizedPnL.toFixed(2)}) | ${thesisNote}`
         );
       }
     }
@@ -555,7 +565,7 @@ export const monitorPositionsTool = defineTool({
     if (positions.length === 0) {
       return {
         content: [{ type: "text", text: "No open positions to monitor." }],
-        details: { exits: [] },
+        details: { exits: [] as any[], positions: 0 },
       };
     }
 
@@ -592,6 +602,18 @@ export const monitorPositionsTool = defineTool({
       lines.push("💡 Next step: Call place_sell_order for each position that needs to exit.");
     }
 
+    // Log to activity stream
+    if (exits.length > 0) {
+      state.recordActivity("signal", `monitor_positions flagged ${exits.length} exit(s): ${exits.map(e => `${e.symbol} (${e.reason.slice(0, 50)})`).join(", ")}`, {
+        details: `Exits needed: ${exits.map(e => `${e.symbol} @ $${e.price.toFixed(2)} — ${e.reason}`).join(" | ")}`,
+        metadata: { exits: exits.length, exitSymbols: exits.map(e => e.symbol), positionsChecked: positions.length },
+      });
+    } else {
+      state.recordActivity("signal", `monitor_positions checked ${positions.length} position(s) — all within parameters`, {
+        metadata: { positionsChecked: positions.length, exits: 0 },
+      });
+    }
+
     return {
       content: [{ type: "text", text: lines.join("\n") }],
       details: { exits, positions: positions.length },
@@ -599,117 +621,60 @@ export const monitorPositionsTool = defineTool({
   },
 });
 
-// ─── TOOL 11: trade_news_momentum (analysis only) ───────────────────────────
+// ─── TOOL 11: trade_news_momentum (data only — agent reasons) ────────────────
 
 export const tradeNewsMomentumTool = defineTool({
   name: "trade_news_momentum",
   label: "Trade News Momentum",
   description:
-    "Analyze a specific headline for short-term directional momentum. " +
-    "Returns a signal with direction, impact score, confidence, and sizing guidance. " +
-    "Does NOT execute — call place_buy_order after analysis.",
+    "Get price context and the full text of a news headline for a ticker. " +
+    "Returns multi-timeframe price action bars so you can evaluate the setup. " +
+    "Does NOT execute.",
   parameters: Type.Object({
     headline: Type.String({ description: "The headline text" }),
     summary: Type.String({ description: "Article summary or body" }),
     ticker: Type.String({ description: "The ticker symbol" }),
   }),
   execute: async (_id, params) => {
-    const price = await getPrice(params.ticker ?? "");
-    const signal = await analyzeNews(params.headline ?? "", params.summary ?? "", params.ticker ?? "", price || 0);
+    const ctx = await buildTickerContext({ symbol: params.ticker ?? "" });
 
     const lines: string[] = [
-      `NEWS MOMENTUM ANALYSIS:`,
-      `  Ticker: ${signal.symbol}`,
-      `  Direction: ${signal.direction.toUpperCase()}`,
-      `  Impact Score: ${signal.impactScore}/10`,
-      `  Confidence: ${(signal.confidence * 100).toFixed(0)}%`,
-      `  Reasoning: ${signal.reasoning}`,
-      `  Suggested Size: ${(signal.suggestedSizePct * 100).toFixed(0)}%`,
-      `  Suggested Hold: ${signal.suggestedHoldMinutes} min`,
+      ...ctx,
+      "",
+      "─ NEWS ─",
+      `  Headline: ${params.headline}`,
+      `  Summary: ${params.summary}`,
     ];
-
-    if (price) lines.push(`  Current Price: $${price.toFixed(2)}`);
-
-    if (signal.direction === "neutral" || signal.confidence < 0.6) {
-      lines.push("", "⚠️ Signal is weak or neutral. Consider holding cash.");
-    } else {
-      lines.push("", "💡 Next step: Call place_buy_order if you want to execute.");
-    }
 
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      details: signal,
+      details: { ticker: params.ticker, headline: params.headline },
     };
   },
 });
 
-// ─── TOOL 12: trade_mean_reversion (analysis only) ──────────────────────────
+// ─── TOOL 12: trade_mean_reversion (data only — agent reasons) ───────────────
 
 export const tradeMeanReversionTool = defineTool({
   name: "trade_mean_reversion",
   label: "Trade Mean Reversion",
   description:
-    "Evaluate a ticker for mean-reversion potential. " +
-    "Best when: market is choppy, name moved >2% on no clear catalyst.",
+    "Get multi-timeframe price context for a ticker to evaluate mean-reversion potential. " +
+    "Returns 30d and 1d price bars, relative strength vs SPY, and volume context. " +
+    "Best when: market is choppy, name moved >2% on no clear catalyst. " +
+    "Does NOT execute.",
   parameters: Type.Object({
     ticker: Type.String({ description: "The ticker symbol" }),
   }),
   execute: async (_id, params) => {
-    const price = await getPrice(params.ticker ?? "");
-    if (!price) {
-      return {
-        content: [{ type: "text", text: `Could not get price for ${params.ticker}.` }],
-        details: { signal: null },
-      };
-    }
-
-    const prevClose = await getPreviousClose(params.ticker ?? "");
-    const changePct = prevClose ? ((price - prevClose) / prevClose) * 100 : 0;
-    const isOverextended = Math.abs(changePct) > 2;
-    const direction = changePct > 2 ? "short" : changePct < -2 ? "long" : "neutral";
-
-    const reasoning = prevClose
-      ? `${params.ticker} is ${changePct > 0 ? "up" : "down"} ${Math.abs(changePct).toFixed(2)}% from prior close. ${isOverextended ? "Potential mean-reversion candidate." : "Not significantly extended."}`
-      : "Could not determine prior close.";
-
-    const lines: string[] = [
-      `MEAN REVERSION ANALYSIS:`,
-      `  Ticker: ${params.ticker}`,
-      `  Current: $${price.toFixed(2)}`,
-      `  Prior Close: ${prevClose ? `$${prevClose.toFixed(2)}` : "unknown"}`,
-      `  Change: ${changePct.toFixed(2)}%`,
-      `  Signal: ${direction.toUpperCase()}`,
-      `  Reasoning: ${reasoning}`,
-    ];
-
-    if (isOverextended) {
-      lines.push("", "💡 Next step: Call place_buy_order (for dips) if you want to fade.");
-    }
+    const ctx = await buildTickerContext({ symbol: params.ticker ?? "" });
 
     return {
-      content: [{ type: "text", text: lines.join("\n") }],
-      details: { direction, changePct, isOverextended, reasoning },
+      content: [{ type: "text", text: ctx.join("\n") }],
+      details: { ticker: params.ticker },
     };
   },
 });
-
-async function getPreviousClose(symbol: string): Promise<number | null> {
-  try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`,
-      { headers: { "User-Agent": "Mozilla/5.0" } }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    const results = data.chart?.result?.[0];
-    if (!results) return null;
-    const closes = results.indicators?.quote?.[0]?.close;
-    if (!closes || closes.length < 2) return null;
-    return closes[closes.length - 2];
-  } catch {
-    return null;
-  }
-}
 
 // ─── TOOL 13: place_buy_order ──────────────────────────────────────────────
 
@@ -735,13 +700,14 @@ export const placeBuyOrderTool = defineTool({
     if (!price) {
       return {
         content: [{ type: "text", text: `❌ No price data for ${params.ticker}.` }],
-        details: { executed: false, reason: "No price data" },
+        details: { executed: false, reason: "No price data", dryRun: false, ticker: null as any, price: 0, notional: 0, plan: null as any, order: null as any, error: null as any },
       };
     }
 
     const signal = {
       symbol: params.ticker ?? "",
       direction: "long" as const,
+      strategy: params.strategy ?? "unknown",
       impactScore: 7,
       confidence: 0.7,
       suggestedSizePct: params.notional ? params.notional / 100 : 0.20,
@@ -780,7 +746,7 @@ export const placeBuyOrderTool = defineTool({
     if (!risk.allowed) {
       return {
         content: [{ type: "text", text: `⛔ RISK BLOCKED: ${risk.reason}\nNo order placed.` }],
-        details: { executed: false, reason: risk.reason },
+        details: { executed: false, reason: risk.reason, dryRun: false, ticker: null as any, price: 0, notional: 0, plan: null as any, order: null as any, error: null as any },
       };
     }
 
@@ -801,13 +767,13 @@ export const placeBuyOrderTool = defineTool({
       );
       return {
         content: [{ type: "text", text: `[DRY RUN] Simulated buy $${notional.toFixed(2)} of ${params.ticker} @ $${price.toFixed(2)}\nStop: $${plan.stopPrice.toFixed(2)} | Hold until: ${plan.exitTime.toISOString()}` }],
-        details: { executed: true, dryRun: true, ticker: params.ticker, price, notional, plan },
+        details: { executed: true, dryRun: true, ticker: params.ticker, price, notional, plan, reason: "", order: null as any, error: null as any },
       };
     }
 
     try {
       const order = await submitOrder({
-        symbol: params.ticker,
+        symbol: params.ticker!,
         notional,
         side: "buy",
         timeInForce: "day",
@@ -826,22 +792,22 @@ export const placeBuyOrderTool = defineTool({
         { source: params.strategy ?? "", confidence: 0.7, impactScore: 7 }
       );
 
+      state.recordActivity("trade_opened", `Opened long ${qty.toFixed(2)} shares of ${params.ticker} @ $${price.toFixed(2)} (${params.strategy}, confidence ${(0.7 * 100).toFixed(0)}%)`, {
+        metadata: { symbol: params.ticker, price, qty, notional, side: "long", strategy: params.strategy, regime },
+      });
+
       return {
         content: [{ type: "text", text: `✅ ORDER PLACED: ${params.ticker}\nNotional: $${notional.toFixed(2)} | Price: $${price.toFixed(2)}\nStop: $${plan.stopPrice.toFixed(2)} | Hold: ${plan.exitTime.toISOString()}\nID: ${order.id}` }],
-        details: { executed: true, order, ticker: params.ticker, price, notional, plan },
+        details: { executed: true, order, ticker: params.ticker, price, notional, plan, reason: "", dryRun: false, error: null as any },
       };
     } catch (e: any) {
       return {
         content: [{ type: "text", text: `❌ ORDER FAILED: ${e.message}` }],
-        details: { executed: false, error: e.message },
+        details: { executed: false, error: e.message, reason: "", dryRun: false, ticker: null as any, price: 0, notional: 0, plan: null as any, order: null as any },
       };
     }
   },
 });
-
-// ─── TOOL 14: place_sell_order ──────────────────────────────────────────────
-
-// ─── TOOL 13b: place_short_order ────────────────────────────────────────────
 
 export const placeShortOrderTool = defineTool({
   name: "place_short_order",
@@ -873,6 +839,7 @@ export const placeShortOrderTool = defineTool({
     const signal = {
       symbol: params.ticker ?? "",
       direction: "short" as const,
+      strategy: params.strategy ?? "unknown",
       impactScore: 7,
       confidence: 0.7,
       suggestedSizePct: params.notional ? params.notional / 100 : 0.20,
@@ -907,7 +874,7 @@ export const placeShortOrderTool = defineTool({
     if (relevantLessons.length > 0) {
       const highWeightLessons = relevantLessons.filter((l) => l.weight >= 0.7);
       if (highWeightLessons.length > 0) {
-        memoryWarning = highWeightLessons.map((l) => `[${l.category}] ${l.insight.slice(0, 100)}`).join(" | ");
+        memoryWarning = highWeightLessons.map((l) => `[${l.category}] ${(l.insight || '').slice(0, 100)}`).join(" | ");
       }
     }
     if (similarTrades.length > 0) {
@@ -990,6 +957,10 @@ export const placeShortOrderTool = defineTool({
         "short"
       );
 
+      state.recordActivity("trade_opened", `Opened short ${qty.toFixed(2)} shares of ${params.ticker} @ $${price.toFixed(2)} (${params.strategy}, confidence ${(0.7 * 100).toFixed(0)}%)`, {
+        metadata: { symbol: params.ticker, price, qty, notional, side: "short", strategy: params.strategy, regime },
+      });
+
       const memoryPrefix = memoryWarning ? `🧠 MEMORY: ${memoryWarning}\n\n` : "";
       return {
         content: [{ type: "text", text: `${memoryPrefix}✅ SHORT ORDER PLACED: ${params.ticker}\nNotional: $${notional.toFixed(2)} | Price: $${price.toFixed(2)}\nCover trigger: $${plan.stopPrice.toFixed(2)} | Hold: ${plan.exitTime.toISOString()}\nID: ${order.id}` }],
@@ -1023,15 +994,18 @@ export const placeSellOrderTool = defineTool({
     if (!price) {
       return {
         content: [{ type: "text", text: `⚠️ No price for ${params.ticker}. Recording estimated exit.` }],
-        details: { executed: false, reason: "No price data" },
+        details: { executed: false, reason: "No price data", dryRun: false, ticker: params.ticker, price: 0, order: undefined },
       };
     }
 
     if (dryRun) {
       state.recordExit(params.ticker ?? "", price, params.reason ?? "");
+      state.recordActivity("trade_closed", `Closed ${params.ticker} @ $${price.toFixed(2)} — ${params.reason}`, {
+        metadata: { symbol: params.ticker, price, reason: params.reason, dryRun: true },
+      });
       return {
         content: [{ type: "text", text: `[DRY RUN] Simulated sell ${params.ticker} @ $${price.toFixed(2)} | ${params.reason}` }],
-        details: { executed: true, dryRun: true, ticker: params.ticker, price, reason: params.reason },
+        details: { executed: true, dryRun: true, ticker: params.ticker, price, reason: params.reason!, order: undefined },
       };
     }
 
@@ -1039,15 +1013,18 @@ export const placeSellOrderTool = defineTool({
       const result = await liquidateSymbol(params.ticker ?? "");
       if (result.success) {
         state.recordExit(params.ticker ?? "", price, params.reason ?? "");
+        state.recordActivity("trade_closed", `Closed ${params.ticker} @ $${price.toFixed(2)} — ${params.reason}`, {
+          metadata: { symbol: params.ticker, price, reason: params.reason, orderId: result.order?.id },
+        });
         return {
           content: [{ type: "text", text: `✅ SOLD ${params.ticker} @ $${price.toFixed(2)} | ${params.reason}\nID: ${result.order?.id ?? "N/A"}` }],
-          details: { executed: true, ticker: params.ticker, price, reason: params.reason, order: result.order },
+          details: { executed: true, dryRun: false, ticker: params.ticker, price, reason: params.reason!, order: result.order },
         };
       } else {
-        return { content: [{ type: "text", text: `❌ SELL FAILED: ${result.error}` }], details: { executed: false, error: result.error } };
+        return { content: [{ type: "text", text: `❌ SELL FAILED: ${result.error}` }], details: { executed: false, reason: result.error, dryRun: false, ticker: params.ticker, price: 0, order: undefined } };
       }
     } catch (e: any) {
-      return { content: [{ type: "text", text: `❌ SELL FAILED: ${e.message}` }], details: { executed: false, error: e.message } };
+      return { content: [{ type: "text", text: `❌ SELL FAILED: ${e.message}` }], details: { executed: false, reason: e.message, dryRun: false, ticker: params.ticker, price: 0, order: undefined } };
     }
   },
 });
@@ -1058,11 +1035,13 @@ export const closePositionTool = defineTool({
   name: "close_position",
   label: "Close Position",
   description:
-    "Evaluate an open position for exit conditions. Returns recommendation for both LONG and SHORT positions. " +
+    "Evaluate an open position for exit conditions by comparing the original thesis against current conditions. " +
+    "Returns recommendation for both LONG and SHORT positions with thesis analysis. " +
     "Does NOT execute — call place_sell_order to actually close.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker to evaluate" }),
     reason: Type.String({ description: "Why considering close" }),
+    thesisNote: Type.Optional(Type.String({ description: "Your assessment: does the original thesis still hold? This gets logged for later analysis." })),
   }),
   execute: async (_id, params) => {
     const state = requireState();
@@ -1072,7 +1051,7 @@ export const closePositionTool = defineTool({
     if (!pos) {
       return {
         content: [{ type: "text", text: `No tracked position in ${params.ticker}.` }],
-        details: { hasPosition: false },
+        details: { hasPosition: false, pos: null as any, price: null as any, unrealizedPct: 0, timeHeld: 0, check: null as any },
       };
     }
 
@@ -1092,27 +1071,91 @@ export const closePositionTool = defineTool({
     const timeHeld = (Date.now() - new Date(pos.entryTime).getTime()) / 60000;
 
     const directionLabel = pos.direction === "short" ? "SHORT" : "LONG";
+    const regimeChanged = pos.entryRegime !== "unknown" ? `(entry: ${pos.entryRegime.toUpperCase()} → current: check fetch_market_data)` : "";
 
     const lines: string[] = [
       `POSITION EXIT ANALYSIS [${directionLabel}]:`,
       `  ${pos.symbol}: Entry $${pos.entryPrice.toFixed(2)} | Current ${price ? `$${price.toFixed(2)}` : "unavailable"}`,
       `  Unrealized: ${price ? `${unrealizedPct.toFixed(2)}%` : "unknown"}`,
       `  Status: ${pos.status.toUpperCase()}${pos.status === "initial" ? ` | Time held: ${timeHeld.toFixed(1)} min` : ""}${pos.trailingStopPrice ? ` | ${pos.direction === "short" ? "Cover trigger" : "Trailing stop"}: $${pos.trailingStopPrice.toFixed(2)}` : ""}`,
+      ``,
+      `  ORIGINAL THESIS:`,
+      `    Strategy: ${pos.strategy} | Source: ${pos.entrySignalSource}`,
+      `    Entry regime: ${pos.entryRegime.toUpperCase()} | Entry VIX: ${pos.entryVix?.toFixed(1) ?? "?"}`,
+      `    Confidence: ${(pos.entrySignalConfidence * 100).toFixed(0)}% | Impact: ${pos.entrySignalImpactScore}/10`,
       `  Evaluation: ${check.reason}`,
     ];
 
     if (check.shouldExit) {
       lines.push("", "🔴 RECOMMENDATION: EXIT NOW", `  Reason: ${check.reason}`, "", "💡 Call place_sell_order to execute exit.");
     } else if (pos.status === "initial") {
-      const holdMsg = pos.direction === "short" ? "Need price drop" : "Need +1% profit";
-      lines.push("", `🟡 INITIAL HOLD — ${holdMsg} to promote to trailing stop.`, `  Time stop in effect: auto-exit if not profitable within 30 min.`);
+      lines.push("", `🟡 INITIAL HOLD — Thesis still in play. Time stop protects downside.`);
     } else {
-      lines.push("", `🟢 GREEN — Winner running. Trailing ${pos.direction === "short" ? "cover" : "stop"} active.`, `  Let it ride. Will exit automatically if ${pos.direction === "short" ? "cover trigger" : "trailing stop"} hits.`);
+      lines.push("", `🟢 GREEN — Thesis confirmed, winner running. Let trailing stop handle exit.`);
     }
+
+    // Log thesis assessment to activity stream
+    const thesisAssessment = params.thesisNote
+      ? `Agent assessment: ${params.thesisNote}`
+      : `Agent evaluating whether thesis holds (${pos.strategy} via ${pos.entrySignalSource}, entered ${pos.entryRegime} regime)`;
+
+    state.recordActivity("thesis_check", `Evaluated ${pos.symbol} ${directionLabel}: ${check.shouldExit ? "🔴 RECOMMEND EXIT" : check.newStatus === "green" || pos.status === "green" ? "🟢 HOLD (green)" : "🟡 HOLD (initial)"} | ${thesisAssessment.slice(0, 120)}`, {
+      details: thesisAssessment,
+      metadata: {
+        symbol: pos.symbol, direction: pos.direction, strategy: pos.strategy,
+        entryRegime: pos.entryRegime, entryVix: pos.entryVix,
+        unrealizedPct, timeHeld, status: pos.status,
+        shouldExit: check.shouldExit, agentNote: params.thesisNote,
+      },
+    });
 
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      details: { pos, price, unrealizedPct, timeHeld, check },
+      details: { pos, price, unrealizedPct, timeHeld, check, hasPosition: true },
+    };
+  },
+});
+
+// ─── TOOL: record_decision ───────────────────────────────────────────────
+
+/**
+ * Record the agent's reasoning about what it decided this cycle and why.
+ * This is the primary way the agent's thought process gets persisted for
+ * dashboard visibility and post-hoc analysis.
+ *
+ * Call this at the end of each cycle before the agent finishes its turn.
+ */
+export const recordDecisionTool = defineTool({
+  name: "record_decision",
+  label: "Record Decision",
+  description:
+    "Log your reasoning for this cycle to the activity stream. Call this at the end of every cycle " +
+    "to document what you decided and why. This helps with post-hoc analysis and the retrospective. " +
+    "Be specific: which positions you reviewed, what you decided about each, and any trades you took or skipped.",
+  parameters: Type.Object({
+    summary: Type.String({ description: "One-line summary of what you did this cycle (e.g. 'Held AAPL, took no new trades')" }),
+    details: Type.String({ description: "Detailed reasoning: what you checked, what you found, and why you decided what you did" }),
+    positionsReviewed: Type.Optional(Type.String({ description: "Comma-separated list of symbols you reviewed" })),
+    tradesTaken: Type.Optional(Type.String({ description: "Comma-separated list of symbols you traded (or 'none')" })),
+  }),
+  execute: async (_id, params) => {
+    const state = requireState();
+    const portfolio = state.getPortfolio();
+
+    state.recordActivity("decision", `${params.summary}`, {
+      details: params.details,
+      metadata: {
+        positionsReviewed: params.positionsReviewed?.split(",").map((s: string) => s.trim()) || [],
+        tradesTaken: params.tradesTaken?.split(",").map((s: string) => s.trim()) || [],
+        cash: portfolio.cash,
+        dailyPnL: portfolio.dailyPnL,
+        openPositions: portfolio.positions.length,
+      },
+    });
+
+    return {
+      content: [{ type: "text", text: `✅ Decision recorded: ${params.summary}` }],
+      details: { recorded: true },
     };
   },
 });
@@ -1131,6 +1174,10 @@ export const holdCashTool = defineTool({
   execute: async (_id, params) => {
     const state = requireState();
     const portfolio = state.getPortfolio();
+
+    state.recordActivity("decision", `Held cash — ${params.reason}`, {
+      metadata: { cash: portfolio.cash, settledCash: portfolio.settledCash },
+    });
 
     return {
       content: [{ type: "text", text: `HOLDING CASH\n  Reason: ${params.reason}\n  Cash: $${portfolio.cash.toFixed(2)} | Settled: $${portfolio.settledCash.toFixed(2)}\n  Daily P&L: $${portfolio.dailyPnL.toFixed(2)}\n\n✓ Cash is a position.` }],
@@ -1157,7 +1204,7 @@ export const reflectOnPerformanceTool = defineTool({
     if (recent.length === 0) {
       return {
         content: [{ type: "text", text: "No trade history yet." }],
-        details: { trades: 0 },
+        details: { recent: [] as any[], summary: null as any },
       };
     }
 
@@ -1226,7 +1273,7 @@ export const emergencyCloseAllTool = defineTool({
     const positions = state.getPositions();
 
     if (positions.length === 0) {
-      return { content: [{ type: "text", text: "No open positions." }], details: { closed: 0 } };
+      return { content: [{ type: "text", text: "No open positions." }], details: { closed: 0, reason: null as any, dryRun: false, error: undefined } };
     }
 
     if (dryRun) {
@@ -1236,7 +1283,7 @@ export const emergencyCloseAllTool = defineTool({
       }
       return {
         content: [{ type: "text", text: `[DRY RUN] Emergency closed ${positions.length} positions. ${params.reason}` }],
-        details: { closed: positions.length, reason: params.reason, dryRun: true },
+        details: { closed: positions.length, reason: params.reason, dryRun: true, error: undefined },
       };
     }
 
@@ -1248,10 +1295,10 @@ export const emergencyCloseAllTool = defineTool({
       }
       return {
         content: [{ type: "text", text: `🚨 EMERGENCY CLOSED ${positions.length} positions. ${params.reason}` }],
-        details: { closed: positions.length, reason: params.reason },
+        details: { closed: positions.length, reason: params.reason, dryRun: false, error: undefined },
       };
     } catch (e: any) {
-      return { content: [{ type: "text", text: `❌ EMERGENCY CLOSE FAILED: ${e.message}` }], details: { closed: 0, error: e.message } };
+      return { content: [{ type: "text", text: `❌ EMERGENCY CLOSE FAILED: ${e.message}` }], details: { closed: 0, reason: e.message, dryRun: false, error: e.message } };
     }
   },
 });
@@ -1302,7 +1349,7 @@ export const findSimilarTradesTool = defineTool({
     if (similar.length === 0) {
       return {
         content: [{ type: "text", text: "No similar trades in memory yet. Need more history to compare." }],
-        details: { similar: [] },
+        details: { similar: [], winRate: 0, avgPnlPct: 0 },
       };
     }
 
@@ -1408,7 +1455,7 @@ export const viewContextTool = defineTool({
     if (notes.length === 0) {
       return {
         content: [{ type: "text", text: "📋 No active context notes. Use note_context to start tracking something." }],
-        details: { count: 0 },
+        details: { count: 0, notes: [] },
       };
     }
 
@@ -1457,7 +1504,7 @@ export const pruneContextTool = defineTool({
       state.removeContextNotes(ids as string[]);
       return {
         content: [{ type: "text", text: `🗑️ Removed ${ids.length} context note(s).` }],
-        details: { removed: ids.length },
+        details: { removed: ids.length, pruned: 0 },
       };
     }
 
@@ -1466,13 +1513,161 @@ export const pruneContextTool = defineTool({
     if (pruned > 0) {
       return {
         content: [{ type: "text", text: `🧹 Auto-pruned ${pruned} stale note(s) (not referenced in 2+ hours).` }],
-        details: { pruned },
+        details: { pruned, removed: 0 },
       };
     }
 
     return {
       content: [{ type: "text", text: "No stale notes to prune." }],
-      details: { pruned: 0 },
+      details: { pruned: 0, removed: 0 },
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESEARCH ENGINE TOOLS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── TOOL: search_signals ───────────────────────────────────────────────
+
+export const searchSignalsTool = defineTool({
+  name: "search_signals",
+  label: "Search Research Signals",
+  description:
+    "Query the research database for signal history across all data sources. " +
+    "Signals are gathered 24/7 from: Yahoo movers (gainers/losers/trending), Alpaca news, EDGAR 8-K filings, " +
+    "Reddit mention velocity, relative volume spikes, pre-market gaps, and range breaks. " +
+    "Each signal has a score (0-1), direction (-1 bearish to +1 bullish), and source-specific payload. " +
+    "Optionally include fundamental data (P/E, market cap, SMA, RSI, etc.) in results. " +
+    "Cross-source clusters (same ticker in 2+ sources) are the strongest signal. " +
+    "Use this instead of fetch_edgar_filings, scan_reddit, scan_relative_volume for historical queries.",
+  parameters: Type.Object({
+    ticker: Type.Optional(Type.String({ description: "Filter to one ticker (omit for market-wide)" })),
+    sources: Type.Optional(Type.Array(Type.String(), { description: "Filter to specific sources: yahoo_mover, alpaca_news, edgar, reddit, volume_spike, gap, range_break" })),
+    minScore: Type.Optional(NumStr),
+    sinceMinutes: Type.Optional(NumStr),
+    granularity: Type.Optional(Type.String({ description: "'raw' (per-event, up to 14d), 'hourly' (up to 90d), 'daily' (up to 365d), or 'auto' (default)" })),
+    sortBy: Type.Optional(Type.String({ description: "'time' or 'score' (default: score)" })),
+    maxResults: Type.Optional(NumStr),
+    includeFundamentals: Type.Optional(Type.Boolean({ description: "Include latest fundamentals snapshot for each result" })),
+  }),
+  execute: async (_id, params) => {
+    const store = getSignalStore();
+    const query = {
+      ticker: params.ticker,
+      sources: params.sources as any,
+      minScore: coerceNumber(params.minScore, undefined as any),
+      sinceMinutes: coerceNumber(params.sinceMinutes, 1440),
+      granularity: params.granularity as any,
+      sortBy: params.sortBy as any,
+      maxResults: coerceNumber(params.maxResults, 50),
+    };
+
+    const results = store.searchSignals(query);
+
+    if (results.length === 0) {
+      return {
+        content: [{ type: "text", text: "🔍 No matching signals found in the research database. Try expanding your time window or removing filters." }],
+        details: { count: 0, results: [] },
+      };
+    }
+
+    // Also get cross-source clusters for context
+    const clusters = store.findClusters(2, query.sinceMinutes);
+    const relevantClusters = query.ticker
+      ? clusters.filter((c) => String(c.ticker) === query.ticker!.toUpperCase())
+      : clusters;
+
+    const lines: string[] = [
+      `🔍 SIGNAL SEARCH: ${results.length} results (${query.granularity || "raw"}, last ${query.sinceMinutes}min)`,
+      "",
+    ];
+
+    // Show clusters first if any
+    if (relevantClusters.length > 0) {
+      lines.push("CROSS-SOURCE CLUSTERS (multi-source convergence):");
+      for (const c of relevantClusters.slice(0, 5)) {
+        lines.push(`  🔥 [${c.ticker}] ${c.source_count} sources | avg score: ${Number(c.avg_score).toFixed(2)} | bullish: ${c.bullish_total}, bearish: ${c.bearish_total}`);
+      }
+      lines.push("");
+    }
+
+    // Show individual signals
+    lines.push("SIGNALS:");
+    for (const r of results.slice(0, 30)) {
+      const dir = Number(r.direction) > 0.3 ? "🟢" : Number(r.direction) < -0.3 ? "🔴" : "⚪";
+      const ts = String(r.timestamp || r.bucket_hour || r.bucket_date || "").slice(0, 19);
+      const src = String(r.source || "");
+      lines.push(`  ${dir} [${r.ticker}] ${src} | score: ${Number(r.score || r.avg_score || 0).toFixed(2)} | ${ts}`);
+    }
+
+    if (results.length > 30) {
+      lines.push(`  ... and ${results.length - 30} more (use filter to narrow)`);
+    }
+
+    // Optionally attach fundamentals
+    if (params.includeFundamentals && query.ticker) {
+      const funds = store.getFundamentals(query.ticker);
+      if (funds) {
+        const pe = funds.pe_ratio ? `P/E: ${Number(funds.pe_ratio).toFixed(1)}` : "";
+        const cap = funds.market_cap ? `Cap: $${(Number(funds.market_cap) / 1e9).toFixed(1)}B` : "";
+        const rsi = funds.rsi_14 ? `RSI: ${Number(funds.rsi_14).toFixed(0)}` : "";
+        const sma = funds.sma_20 ? `SMA20: $${Number(funds.sma_20).toFixed(2)}` : "";
+        lines.push("", `📊 FUNDAMENTALS (${funds.as_of_date || "latest"}):`);
+        if (pe || cap) lines.push(`  ${pe}${pe && cap ? " | " : ""}${cap}`);
+        if (rsi || sma) lines.push(`  ${rsi}${rsi && sma ? " | " : ""}${sma}`);
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      details: { count: results.length, results, clusters: relevantClusters.slice(0, 10) },
+    };
+  },
+});
+
+// ─── TOOL: describe_datasets ─────────────────────────────────────────────
+
+export const describeDatasetsTool = defineTool({
+  name: "describe_datasets",
+  label: "Describe Research Datasets",
+  description:
+    "View the schema and current state of the research database: tables, columns, row counts, date ranges, " +
+    "and per-source signal breakdowns. Call this at startup or anytime you need to understand what data " +
+    "is available in the research engine. Useful before calling search_signals to know what's queryable.",
+  parameters: Type.Object({}),
+  execute: async () => {
+    const store = getSignalStore();
+    const tables = store.getTableInfo();
+    const dateRanges = store.getDateRange();
+    const sourceBreakdown = store.getSourceBreakdown();
+
+    const lines: string[] = [
+      "📚 RESEARCH DATABASE SCHEMA:",
+      "",
+    ];
+
+    for (const t of tables) {
+      const range = dateRanges[t.name];
+      const dateStr = range?.min
+        ? `${range.min.slice(0, 10)} to ${range.max?.slice(0, 10) || "now"}`
+        : "(empty)";
+      lines.push(`  TABLE: ${t.name} (${t.rowCount} rows)`);
+      lines.push(`  Date range: ${dateStr}`);
+      lines.push(`  Columns: ${t.columns.map((c) => `${c.name}:${c.type}`).join(", ")}`);
+      lines.push("");
+    }
+
+    if (Object.keys(sourceBreakdown).length > 0) {
+      lines.push("SOURCE BREAKDOWN (signals table):");
+      for (const [src, count] of Object.entries(sourceBreakdown).sort((a, b) => b[1] - a[1])) {
+        lines.push(`  ${src}: ${count} signals`);
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      details: { tables, dateRanges, sourceBreakdown },
     };
   },
 });
@@ -1502,6 +1697,7 @@ export const allTradingTools = [
   placeSellOrderTool,
   closePositionTool,
   holdCashTool,
+  recordDecisionTool,
   reflectOnPerformanceTool,
   emergencyCloseAllTool,
   findSimilarTradesTool,
@@ -1509,4 +1705,7 @@ export const allTradingTools = [
   noteContextTool,
   viewContextTool,
   pruneContextTool,
+  // Research engine — persistent signal database
+  searchSignalsTool,
+  describeDatasetsTool,
 ];

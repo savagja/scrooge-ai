@@ -226,6 +226,35 @@ export interface DailyTokenCost {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ACTIVITY STREAM — Human-readable event log for the dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type ActivityEventType =
+  | "trade_opened"
+  | "trade_closed"
+  | "halt"
+  | "halt_lifted"
+  | "regime_shift"
+  | "cycle"
+  | "signal"
+  | "thesis_check"
+  | "strategy_note"
+  | "discovery"
+  | "briefing"
+  | "retrospective"
+  | "system"
+  | "decision";
+
+export interface ActivityEvent {
+  id: string;
+  timestamp: string;
+  type: ActivityEventType;
+  summary: string;                     // Single-line human-readable headline
+  details?: string;                    // 1-3 sentence expansion (optional)
+  metadata?: Record<string, unknown>;  // Structured data for dashboard widgets
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DAILY RETROSPECTIVE REPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -273,4 +302,5 @@ export interface PersistedState {
   sessionInputCost: number;
   sessionOutputCost: number;
   dailyReports: DailyReport[];                // Daily retrospective reports
+  activityStream: ActivityEvent[];            // Human-readable activity event log
 }

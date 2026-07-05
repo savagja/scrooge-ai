@@ -1,0 +1,663 @@
+/**
+ * Research database layer.
+ * SQLite-backed persistent store for signals, fundamentals, corporate events.
+ * Uses sql.js (pure JS/WASM) — zero native deps, works on any platform including armv7l.
+ *
+ * All data gathered deterministically by code. The agent queries through tools.
+ * No LLM involvement in data collection, aggregation, or storage.
+ */
+
+import initSqlJs, { type Database } from "sql.js";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { dirname } from "path";
+import crypto from "crypto";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type SignalSource =
+  | "yahoo_mover"
+  | "alpaca_news"
+  | "edgar"
+  | "reddit"
+  | "volume_spike"
+  | "gap"
+  | "range_break";
+
+export type CorporateEventType =
+  | "earnings"
+  | "dividend"
+  | "split"
+  | "buyback"
+  | "acquisition"
+  | "insider_trade"
+  | "sec_filing";
+
+export interface SignalQuery {
+  ticker?: string;
+  sources?: SignalSource[];
+  minScore?: number;
+  sinceMinutes?: number;
+  granularity?: "raw" | "hourly" | "daily";
+  sortBy?: "time" | "score";
+  maxResults?: number;
+  fundamentalsFilter?: string;
+  includeFundamentals?: boolean;
+}
+
+export interface TableInfo {
+  name: string;
+  rowCount: number;
+  columns: Array<{ name: string; type: string }>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function uuid(): string {
+  return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function hourBucket(ts: string): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:00:00`;
+}
+
+function dateBucket(ts: string): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Execute a query and return rows as objects. */
+function rowsToObjects(headers: string[], values: unknown[][]): Record<string, unknown>[] {
+  return values.map((row) => {
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < headers.length; i++) {
+      obj[headers[i]] = row[i];
+    }
+    return obj;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SQL SCHEMA
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCHEMA_SQL = [
+  `CREATE TABLE IF NOT EXISTS tickers (
+    symbol      TEXT PRIMARY KEY,
+    name        TEXT,
+    sector      TEXT,
+    industry    TEXT,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    is_active   INTEGER DEFAULT 1
+  )`,
+  `CREATE TABLE IF NOT EXISTS signals (
+    id          TEXT PRIMARY KEY,
+    ticker      TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    score       REAL NOT NULL,
+    direction   REAL NOT NULL,
+    payload     TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sig_ticker ON signals(ticker)`,
+  `CREATE INDEX IF NOT EXISTS idx_sig_ts ON signals(timestamp)`,
+  `CREATE INDEX IF NOT EXISTS idx_sig_source ON signals(source)`,
+  `CREATE INDEX IF NOT EXISTS idx_sig_lookup ON signals(ticker, timestamp DESC)`,
+  `CREATE TABLE IF NOT EXISTS signal_hourly (
+    ticker      TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    bucket_hour TEXT NOT NULL,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    avg_score   REAL NOT NULL DEFAULT 0,
+    max_score   REAL NOT NULL DEFAULT 0,
+    bullish_ct  INTEGER NOT NULL DEFAULT 0,
+    bearish_ct  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ticker, source, bucket_hour)
+  )`,
+  `CREATE TABLE IF NOT EXISTS signal_daily (
+    ticker      TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    bucket_date TEXT NOT NULL,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    avg_score   REAL NOT NULL DEFAULT 0,
+    max_score   REAL NOT NULL DEFAULT 0,
+    bullish_ct  INTEGER NOT NULL DEFAULT 0,
+    bearish_ct  INTEGER NOT NULL DEFAULT 0,
+    source_ct   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ticker, source, bucket_date)
+  )`,
+  `CREATE TABLE IF NOT EXISTS fundamentals (
+    ticker             TEXT NOT NULL,
+    as_of_date         TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    market_cap         REAL, pe_ratio     REAL, forward_pe    REAL,
+    ps_ratio          REAL, pb_ratio     REAL, ev_to_ebitda  REAL,
+    total_cash        REAL, total_debt   REAL, book_value    REAL,
+    free_cash_flow    REAL, current_ratio REAL, debt_to_equity REAL,
+    revenue_ttm       REAL, gross_margin REAL, operating_margin REAL,
+    net_margin        REAL, eps_ttm      REAL, eps_growth_yoy REAL,
+    revenue_growth_yoy REAL,
+    avg_volume_20d    REAL, avg_volume_50d REAL, rsi_14        REAL,
+    sma_20            REAL, sma_50       REAL, sma_200       REAL,
+    volatility_30d    REAL, beta          REAL,
+    sector_median_pe  REAL, sector_median_ps REAL,
+    sector_avg_beta   REAL, sector_momentum REAL,
+    PRIMARY KEY (ticker, as_of_date, source)
+  )`,
+  `CREATE TABLE IF NOT EXISTS corporate_events (
+    id          TEXT PRIMARY KEY,
+    ticker      TEXT NOT NULL,
+    event_date  TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    impact      REAL,
+    details     TEXT,
+    source_url  TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ev_ticker ON corporate_events(ticker)`,
+  `CREATE INDEX IF NOT EXISTS idx_ev_date ON corporate_events(event_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_ev_type ON corporate_events(event_type)`,
+  `CREATE VIEW IF NOT EXISTS v_cross_daily AS
+   SELECT bucket_date, ticker,
+          SUM(event_count) AS total_events,
+          COUNT(DISTINCT source) AS source_count,
+          AVG(avg_score) AS mean_score,
+          SUM(bullish_ct) AS total_bullish,
+          SUM(bearish_ct) AS total_bearish
+   FROM signal_daily GROUP BY bucket_date, ticker`,
+];
+
+const RETENTION_RAW_MS = 14 * 86400_000;
+const RETENTION_HOURLY_MS = 90 * 86400_000;
+const RETENTION_DAILY_MS = 365 * 86400_000;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL STORE CLASS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class SignalStore {
+  private db: Database | null = null;
+  private dbPath: string;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private dirty = false;
+  private initDone = false;
+
+  constructor(dbPath: string) {
+    this.dbPath = dbPath;
+  }
+
+  // ── LIFECYCLE ─────────────────────────────────────────────────────────
+
+  async init(): Promise<void> {
+    const SQL = await initSqlJs();
+    mkdirSync(dirname(this.dbPath), { recursive: true });
+
+    if (existsSync(this.dbPath)) {
+      this.db = new SQL.Database(readFileSync(this.dbPath));
+    } else {
+      this.db = new SQL.Database();
+    }
+
+    for (const sql of SCHEMA_SQL) {
+      this.db.run(sql);
+    }
+
+    // Persist empty schema to disk
+    this.flush();
+    this.initDone = true;
+  }
+
+  flush(): void {
+    if (!this.db) return;
+    const data = this.db.export();
+    writeFileSync(this.dbPath, Buffer.from(data));
+    this.dirty = false;
+  }
+
+  private _save(): void {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.flush();
+      this.saveTimer = null;
+    }, 2000);
+  }
+
+  close(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.flush();
+    this.db?.close();
+    this.db = null;
+  }
+
+  private assertReady(): Database {
+    if (!this.db || !this.initDone) throw new Error("SignalStore not initialized. Call init() first.");
+    return this.db;
+  }
+
+  // ── TICKERS ─────────────────────────────────────────────────────────────
+
+  ensureTicker(symbol: string, name?: string, sector?: string, industry?: string): void {
+    const db = this.assertReady();
+    const sym = symbol.toUpperCase();
+    const now = new Date().toISOString();
+
+    const existing = db.exec(`SELECT symbol FROM tickers WHERE symbol = ?`, [sym]);
+    if (existing.length > 0 && existing[0].values.length > 0) {
+      db.run(
+        `UPDATE tickers SET last_seen = ?, sector = COALESCE(?, sector), industry = COALESCE(?, industry), name = COALESCE(?, name) WHERE symbol = ?`,
+        [now, sector ?? null, industry ?? null, name ?? null, sym]
+      );
+    } else {
+      db.run(
+        `INSERT INTO tickers (symbol, name, sector, industry, first_seen, last_seen, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        [sym, name ?? null, sector ?? null, industry ?? null, now, now]
+      );
+    }
+    this._save();
+  }
+
+  // ── SIGNALS ───────────────────────────────────────────────────────────────
+
+  recordSignal(params: {
+    ticker: string;
+    source: SignalSource;
+    score: number;
+    direction: number;
+    payload?: Record<string, unknown>;
+  }): void {
+    this.recordSignals([params]);
+  }
+
+  recordSignals(signals: Array<{
+    ticker: string;
+    source: SignalSource;
+    score: number;
+    direction: number;
+    payload?: Record<string, unknown>;
+  }>): void {
+    const db = this.assertReady();
+    const now = new Date().toISOString();
+
+    for (const s of signals) {
+      const sym = s.ticker.toUpperCase();
+      const id = uuid();
+      const payloadStr = s.payload ? JSON.stringify(s.payload) : null;
+
+      db.run(
+        `INSERT INTO signals (id, ticker, timestamp, source, score, direction, payload) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, sym, now, s.source, s.score, s.direction, payloadStr]
+      );
+
+      // Update hourly aggregate
+      const hb = hourBucket(now);
+      const isBullish = s.direction > 0 ? 1 : 0;
+      const isBearish = s.direction < 0 ? 1 : 0;
+      db.run(
+        `INSERT INTO signal_hourly (ticker, source, bucket_hour, event_count, avg_score, max_score, bullish_ct, bearish_ct)
+         VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+         ON CONFLICT(ticker, source, bucket_hour) DO UPDATE SET
+           event_count = event_count + 1,
+           avg_score = (avg_score * (event_count - 1) + ?) / event_count,
+           max_score = MAX(max_score, ?),
+           bullish_ct = bullish_ct + ?,
+           bearish_ct = bearish_ct + ?`,
+        [sym, s.source, hb, s.score, s.score, isBullish, isBearish,
+         s.score, s.score, isBullish, isBearish]
+      );
+
+      this.ensureTicker(sym);
+    }
+    this._save();
+  }
+
+  // ── SEARCH ────────────────────────────────────────────────────────────
+
+  searchSignals(query: SignalQuery): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const since = new Date(Date.now() - (query.sinceMinutes ?? 1440) * 60000).toISOString();
+    const limit = Math.min(query.maxResults ?? 50, 200);
+
+    // Choose granularity
+    const useGranularity = query.granularity ?? "raw";
+
+    if (useGranularity === "hourly") {
+      return this._searchHourly(db, since, query, limit);
+    }
+    if (useGranularity === "daily") {
+      return this._searchDaily(db, since, query, limit);
+    }
+
+    // Raw signal search
+    let sql = `SELECT s.* FROM signals s WHERE s.timestamp >= ?`;
+    const params: unknown[] = [since];
+
+    if (query.ticker) {
+      sql += ` AND s.ticker = ?`;
+      params.push(query.ticker.toUpperCase());
+    }
+    if (query.sources && query.sources.length > 0) {
+      const placeholders = query.sources.map(() => "?").join(",");
+      sql += ` AND s.source IN (${placeholders})`;
+      params.push(...query.sources);
+    }
+    if (query.minScore !== undefined) {
+      sql += ` AND s.score >= ?`;
+      params.push(query.minScore);
+    }
+
+    sql += query.sortBy === "time" ? ` ORDER BY s.timestamp DESC` : ` ORDER BY s.score DESC`;
+    sql += ` LIMIT ?`;
+    params.push(limit);
+
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  private _searchHourly(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
+    let sql = `SELECT * FROM signal_hourly WHERE bucket_hour >= ?`;
+    const params: unknown[] = [since.slice(0, 16) + ":00"];
+
+    if (query.ticker) {
+      sql += ` AND ticker = ?`;
+      params.push(query.ticker.toUpperCase());
+    }
+    if (query.sources && query.sources.length > 0) {
+      const ph = query.sources.map(() => "?").join(",");
+      sql += ` AND source IN (${ph})`;
+      params.push(...query.sources);
+    }
+    if (query.minScore !== undefined) {
+      sql += ` AND avg_score >= ?`;
+      params.push(query.minScore);
+    }
+    sql += ` ORDER BY ${query.sortBy === "time" ? "bucket_hour DESC" : "max_score DESC"} LIMIT ?`;
+    params.push(limit);
+
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  private _searchDaily(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
+    let sql = `SELECT * FROM signal_daily WHERE bucket_date >= ?`;
+    const params: unknown[] = [since.slice(0, 10)];
+
+    if (query.ticker) {
+      sql += ` AND ticker = ?`;
+      params.push(query.ticker.toUpperCase());
+    }
+    if (query.sources && query.sources.length > 0) {
+      const ph = query.sources.map(() => "?").join(",");
+      sql += ` AND source IN (${ph})`;
+      params.push(...query.sources);
+    }
+    if (query.minScore !== undefined) {
+      sql += ` AND avg_score >= ?`;
+      params.push(query.minScore);
+    }
+    sql += ` ORDER BY ${query.sortBy === "time" ? "bucket_date DESC" : "max_score DESC"} LIMIT ?`;
+    params.push(limit);
+
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  // ── CROSS-SOURCE CLUSTERS ───────────────────────────────────────────────
+
+  /**
+   * Find tickers that appeared in 2+ sources within a time window.
+   * Returns clusters sorted by source count descending.
+   */
+  findClusters(minSources: number = 2, sinceMinutes: number = 1440): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const since = new Date(Date.now() - sinceMinutes * 60000).toISOString();
+
+    const result = db.exec(
+      `SELECT ticker, COUNT(DISTINCT source) AS source_count,
+              AVG(score) AS avg_score, SUM(CASE WHEN direction > 0 THEN 1 ELSE 0 END) AS bullish_total,
+              SUM(CASE WHEN direction < 0 THEN 1 ELSE 0 END) AS bearish_total,
+              COUNT(*) AS total_signals
+       FROM signals
+       WHERE timestamp >= ?
+       GROUP BY ticker
+       HAVING source_count >= ?
+       ORDER BY source_count DESC, avg_score DESC
+       LIMIT 50`,
+      [since, minSources]
+    );
+
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  // ── FUNDAMENTALS ───────────────────────────────────────────────────────
+
+  upsertFundamentals(ticker: string, asOfDate: string, source: string, data: Record<string, unknown>): void {
+    const db = this.assertReady();
+    const sym = ticker.toUpperCase();
+
+    const columns = Object.keys(data);
+    const values = Object.values(data);
+    const setClauses = columns.map((c) => `${c} = COALESCE(?, ${c})`);
+    const placeholders = columns.map(() => "?").join(", ");
+
+    db.run(
+      `INSERT INTO fundamentals (ticker, as_of_date, source, ${columns.join(", ")})
+       VALUES (?, ?, ?, ${placeholders})
+       ON CONFLICT(ticker, as_of_date, source) DO UPDATE SET
+         ${setClauses.join(", ")}`,
+      [sym, asOfDate, source, ...values]
+    );
+    this.ensureTicker(sym);
+    this._save();
+  }
+
+  getFundamentals(ticker: string, asOfDate?: string): Record<string, unknown> | null {
+    const db = this.assertReady();
+    const sym = ticker.toUpperCase();
+
+    let sql, params;
+    if (asOfDate) {
+      sql = `SELECT * FROM fundamentals WHERE ticker = ? AND as_of_date = ? ORDER BY source DESC LIMIT 1`;
+      params = [sym, asOfDate];
+    } else {
+      sql = `SELECT * FROM fundamentals WHERE ticker = ? ORDER BY as_of_date DESC LIMIT 1`;
+      params = [sym];
+    }
+
+    const result = db.exec(sql, params);
+    if (result.length === 0 || result[0].values.length === 0) return null;
+    return rowsToObjects(result[0].columns, [result[0].values[0]])[0];
+  }
+
+  // ── CORPORATE EVENTS ───────────────────────────────────────────────────
+
+  recordCorporateEvent(params: {
+    ticker: string;
+    eventDate: string;
+    eventType: CorporateEventType;
+    impact?: number;
+    details?: Record<string, unknown>;
+    sourceUrl?: string;
+  }): void {
+    const db = this.assertReady();
+    const id = uuid();
+    db.run(
+      `INSERT INTO corporate_events (id, ticker, event_date, event_type, impact, details, source_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        params.ticker.toUpperCase(),
+        params.eventDate,
+        params.eventType,
+        params.impact ?? null,
+        params.details ? JSON.stringify(params.details) : null,
+        params.sourceUrl ?? null,
+      ]
+    );
+    this.ensureTicker(params.ticker.toUpperCase());
+    this._save();
+  }
+
+  getCorporateEvents(ticker: string, sinceMinutes?: number, eventType?: string): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const sym = ticker.toUpperCase();
+
+    let sql = `SELECT * FROM corporate_events WHERE ticker = ?`;
+    const params: unknown[] = [sym];
+
+    if (sinceMinutes !== undefined) {
+      const since = new Date(Date.now() - sinceMinutes * 60000).toISOString();
+      sql += ` AND event_date >= ?`;
+      params.push(since);
+    }
+    if (eventType) {
+      sql += ` AND event_type = ?`;
+      params.push(eventType);
+    }
+
+    sql += ` ORDER BY event_date DESC LIMIT 50`;
+
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  // ── PRUNING ────────────────────────────────────────────────────────────
+
+  /**
+   * Roll up old raw signals into aggregates and delete them.
+   * Should be called every ~60 cycles (~30 minutes at 30s poll).
+   */
+  prune(): { rawDeleted: number; hourlyDeleted: number; dailyDeleted: number } {
+    const db = this.assertReady();
+    const now = Date.now();
+    const rawCutoff = new Date(now - RETENTION_RAW_MS).toISOString();
+    const hourlyCutoff = new Date(now - RETENTION_HOURLY_MS).toISOString();
+    const dailyCutoff = new Date(now - RETENTION_DAILY_MS).toISOString();
+
+    let rawDeleted = 0;
+    let hourlyDeleted = 0;
+    let dailyDeleted = 0;
+
+    // Fold raw signals > 14 days into daily aggregates, then delete
+    const staleRaw = db.exec(
+      `SELECT ticker, source, timestamp, score, direction FROM signals WHERE timestamp < ?`,
+      [rawCutoff]
+    );
+
+    if (staleRaw.length > 0) {
+      for (const row of staleRaw[0].values) {
+        const ticker = String(row[0]);
+        const source = String(row[1]);
+        const ts = String(row[2]);
+        const score = Number(row[3]);
+        const direction = Number(row[4]);
+        const bd = dateBucket(ts);
+        const isBull = direction > 0 ? 1 : 0;
+        const isBear = direction < 0 ? 1 : 0;
+
+        db.run(
+          `INSERT INTO signal_daily (ticker, source, bucket_date, event_count, avg_score, max_score, bullish_ct, bearish_ct, source_ct)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, 1)
+           ON CONFLICT(ticker, source, bucket_date) DO UPDATE SET
+             event_count = event_count + 1,
+             avg_score = (avg_score * (event_count - 1) + ?) / event_count,
+             max_score = MAX(max_score, ?),
+             bullish_ct = bullish_ct + ?,
+             bearish_ct = bearish_ct + ?,
+             source_ct = source_ct + 1`,
+          [ticker, source, bd, score, score, isBull, isBear, score, score, isBull, isBear]
+        );
+      }
+
+      db.run(`DELETE FROM signals WHERE timestamp < ?`, [rawCutoff]);
+      rawDeleted = staleRaw[0].values.length;
+    }
+
+    // Delete stale hourly
+    const hrResult = db.exec(`SELECT COUNT(*) AS c FROM signal_hourly WHERE bucket_hour < ?`, [hourlyCutoff]);
+    if (hrResult.length > 0 && hrResult[0].values.length > 0) {
+      hourlyDeleted = Number(hrResult[0].values[0][0]);
+      db.run(`DELETE FROM signal_hourly WHERE bucket_hour < ?`, [hourlyCutoff]);
+    }
+
+    // Delete stale daily
+    const drResult = db.exec(`SELECT COUNT(*) AS c FROM signal_daily WHERE bucket_date < ?`, [dailyCutoff]);
+    if (drResult.length > 0 && drResult[0].values.length > 0) {
+      dailyDeleted = Number(drResult[0].values[0][0]);
+      db.run(`DELETE FROM signal_daily WHERE bucket_date < ?`, [dailyCutoff]);
+    }
+
+    this._save();
+    return { rawDeleted, hourlyDeleted, dailyDeleted };
+  }
+
+  // ── SCHEMA / DESCRIBE ──────────────────────────────────────────────────
+
+  getTableInfo(): TableInfo[] {
+    const db = this.assertReady();
+    const tables = ["tickers", "signals", "signal_hourly", "signal_daily", "fundamentals", "corporate_events"];
+    const info: TableInfo[] = [];
+
+    for (const name of tables) {
+      const colResult = db.exec(`PRAGMA table_info(${name})`);
+      const columns = colResult.length > 0
+        ? colResult[0].values.map((r) => ({ name: String(r[1]), type: String(r[2]) }))
+        : [];
+
+      const countResult = db.exec(`SELECT COUNT(*) AS c FROM ${name}`);
+      const rowCount = countResult.length > 0 ? Number(countResult[0].values[0][0]) : 0;
+
+      info.push({ name, rowCount, columns });
+    }
+
+    return info;
+  }
+
+  getDateRange(): Record<string, { min: string | null; max: string | null }> {
+    const db = this.assertReady();
+    const ranges: Record<string, { min: string | null; max: string | null }> = {};
+
+    const queries: [string, string][] = [
+      ["signals", "timestamp"],
+      ["signal_hourly", "bucket_hour"],
+      ["signal_daily", "bucket_date"],
+      ["fundamentals", "as_of_date"],
+      ["corporate_events", "event_date"],
+    ];
+
+    for (const [table, col] of queries) {
+      const result = db.exec(`SELECT MIN(${col}), MAX(${col}) FROM ${table}`);
+      if (result.length > 0 && result[0].values.length > 0) {
+        ranges[table] = {
+          min: result[0].values[0][0] ? String(result[0].values[0][0]) : null,
+          max: result[0].values[0][1] ? String(result[0].values[0][1]) : null,
+        };
+      } else {
+        ranges[table] = { min: null, max: null };
+      }
+    }
+
+    return ranges;
+  }
+
+  getSourceBreakdown(): Record<string, number> {
+    const db = this.assertReady();
+    const result = db.exec(`SELECT source, COUNT(*) AS c FROM signals GROUP BY source ORDER BY c DESC`);
+    const breakdown: Record<string, number> = {};
+    if (result.length > 0) {
+      for (const row of result[0].values) {
+        breakdown[String(row[0])] = Number(row[1]);
+      }
+    }
+    return breakdown;
+  }
+}

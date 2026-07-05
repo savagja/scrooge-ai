@@ -49,7 +49,7 @@ def _alpaca_get(path: str):
 
 
 def _get_live_account():
-    """Fetch current account from Alpaca. Returns dict with cash, equity, or None."""
+    """Fetch current account from Alpaca. Returns dict with cash, equity, last_equity, or None."""
     data = _alpaca_get("/account")
     if not data:
         return None
@@ -57,6 +57,7 @@ def _get_live_account():
         "cash": float(data.get("cash", 0)),
         "equity": float(data.get("equity", 0)),
         "portfolio_value": float(data.get("portfolio_value", 0)),
+        "last_equity": float(data["last_equity"]) if data.get("last_equity") else None,
     }
 
 
@@ -136,15 +137,18 @@ def overview():
         ),
     }
 
-    # Daily change: current equity minus today's starting baseline
-    history = state.get("portfolioHistory", [])
-    today_snaps = [s for s in history if s.get("timestamp", "").startswith(today)]
-    if today_snaps:
-        baseline_equity = safe_float(today_snaps[0]["totalEquity"])
+    # Daily change: prefer Alpaca's last_equity (prior close), fall back to snapshot baseline
+    if live_account and live_account.get("last_equity") is not None:
+        daily_change = round(total_equity - live_account["last_equity"], 2)
     else:
-        # Day rolled over — use last snapshot from previous day
-        baseline_equity = safe_float(history[-1]["totalEquity"]) if history else cash
-    daily_change = round(total_equity - baseline_equity, 2)
+        history = state.get("portfolioHistory", [])
+        today_snaps = [s for s in history if s.get("timestamp", "").startswith(today)]
+        if today_snaps:
+            baseline_equity = safe_float(today_snaps[0]["totalEquity"])
+        else:
+            # Day rolled over — use last snapshot from previous day
+            baseline_equity = safe_float(history[-1]["totalEquity"]) if history else cash
+        daily_change = round(total_equity - baseline_equity, 2)
 
     daily_token_cost = session_tokens["totalCost"]
 
@@ -210,10 +214,10 @@ def daily_range():
     if not day_snaps:
         return jsonify({
             "date": date_str,
-            "high": safe_float(state["cash"]),
-            "low": safe_float(state["cash"]),
-            "current": safe_float(state["cash"]),
-            "open": safe_float(state["cash"]),
+            "high": 0,
+            "low": 0,
+            "current": 0,
+            "open": 0,
             "samples": 0,
         })
 
@@ -246,12 +250,16 @@ def equity_curve():
     if not history:
         return jsonify({"points": []})
 
-    # Group snapshots by day
-    day_map: dict[str, list[float]] = {}
+    # Group snapshots by day — track last snapshot per day for dailyPnL
+    day_map: dict[str, dict] = {}
     for snap in history:
         day = snap["timestamp"][:10]
         eq = safe_float(snap["totalEquity"])
-        day_map.setdefault(day, []).append(eq)
+        pnl = safe_float(snap.get("dailyPnL", 0))
+        if day not in day_map:
+            day_map[day] = {"equities": [], "lastDailyPnL": 0}
+        day_map[day]["equities"].append(eq)
+        day_map[day]["lastDailyPnL"] = pnl  # last snapshot's dailyPnL wins
 
     # Sort days, take last N
     sorted_days = sorted(day_map.keys())
@@ -259,8 +267,9 @@ def equity_curve():
 
     points = []
     for day in window:
-        eqs = day_map[day]
-        close = eqs[-1]          # last snapshot = end of day-ish
+        eqs = day_map[day]["equities"]
+        daily_pnl = day_map[day]["lastDailyPnL"]
+        close = eqs[-1]
         high = max(eqs)
         low = min(eqs)
         points.append({
@@ -268,6 +277,7 @@ def equity_curve():
             "close": round(close, 2),
             "high": round(high, 2),
             "low": round(low, 2),
+            "dailyPnL": round(daily_pnl, 2),
         })
 
     return jsonify({"points": points})
@@ -295,6 +305,42 @@ def positions():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  GET /api/activity-stream?hours=24&type=regime_shift
+#  Human-readable activity stream — the "what has Scrooge been doing?" feed.
+#  Returns reverse-chronological events within a time window. Defaults to 24 hours.
+#  Also accepts ?limit=N to override (e.g. ?limit=10 always returns 10).
+#  If both hours and limit are given, hours takes precedence for filtering,
+#  then limit constrains the response.
+# ─────────────────────────────────────────────────────────────────────────
+@app.route("/api/activity-stream")
+def activity_stream():
+    state = load_state()
+    if isinstance(state, tuple):
+        return jsonify(state[0]), state[1]
+
+    hours = request.args.get("hours", 24, type=float)
+    limit = request.args.get("limit", type=int)  # optional cap on top of time window
+    event_type = request.args.get("type")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff_str = cutoff.isoformat()
+
+    stream = list(reversed(state.get("activityStream", [])))
+
+    # Filter by time window first
+    stream = [e for e in stream if e.get("timestamp", "") >= cutoff_str]
+
+    # Then optional type filter
+    if event_type:
+        stream = [e for e in stream if e.get("type") == event_type]
+
+    return jsonify({
+        "events": stream[:limit] if limit else stream,
+        "total": len(stream),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  GET /api/trades?limit=20
 #  Recent trade history.
 # ─────────────────────────────────────────────────────────────────────────
@@ -314,7 +360,9 @@ def trades():
 
 # ─────────────────────────────────────────────────────────────────────────
 #  GET /api/token-stats?days=30
-#  Token usage and cost history. Also includes ROI ratio.
+#  Token usage and cost history. Also includes ROI and daily efficiency.
+#  Efficiency = dailyPnL / |totalCost| — computed per day from snapshotted data.
+#  For today, uses the provisional session totals.
 # ─────────────────────────────────────────────────────────────────────────
 @app.route("/api/token-stats")
 def token_stats():
@@ -324,6 +372,7 @@ def token_stats():
 
     days = request.args.get("days", 30, type=int)
     history = state.get("tokenCosts", [])
+    portfolio_history = state.get("portfolioHistory", [])
 
     # Build daily cost map
     cost_map = {}
@@ -346,17 +395,38 @@ def token_stats():
             "totalCost": session_cost,
         }
 
+    # Build daily PnL map from snapshots (last snapshot per day)
+    pnl_map = {}
+    for snap in portfolio_history:
+        day = snap["timestamp"][:10]
+        pnl_map[day] = safe_float(snap.get("dailyPnL", 0))
+
     # Sort and slice
     sorted_dates = sorted(cost_map.keys())
     window = sorted_dates[-days:] if len(sorted_dates) > days else sorted_dates
-    daily = [{"date": d, **cost_map[d]} for d in window]
+
+    daily = []
+    for d in window:
+        entry = {"date": d, **cost_map[d]}
+        # For closed days (not today), use the snapshotted daily PnL
+        if d != today:
+            entry["dailyPnL"] = pnl_map.get(d, 0)
+        else:
+            # Today: no snapshotted PnL yet — the overview is the live source
+            entry["dailyPnL"] = None
+        cost = entry["totalCost"]
+        pnl = entry["dailyPnL"]
+        if pnl is not None and cost is not None and abs(cost) > 0:
+            entry["efficiency"] = round(pnl / abs(cost), 4)
+        else:
+            entry["efficiency"] = None
+        daily.append(entry)
 
     total_tokens = sum(d["inputTokens"] + d["outputTokens"] for d in daily)
     total_cost = sum(d["totalCost"] for d in daily)
 
     # Compute trade profits per $ of token spend
     trades = state.get("tradeHistory", [])
-    # Calculate realized P&L over the same window
     start_date = window[0] if window else None
     realized_pnl = 0.0
     for t in trades:
