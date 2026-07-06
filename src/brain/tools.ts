@@ -1564,15 +1564,6 @@ export const searchSignalsTool = defineTool({
     };
 
     const results = store.searchSignals(query);
-
-    if (results.length === 0) {
-      return {
-        content: [{ type: "text", text: "🔍 No matching signals found in the research database. Try expanding your time window or removing filters." }],
-        details: { count: 0, results: [] },
-      };
-    }
-
-    // Also get cross-source clusters for context
     const clusters = store.findClusters(2, query.sinceMinutes);
     const relevantClusters = query.ticker
       ? clusters.filter((c) => String(c.ticker) === query.ticker!.toUpperCase())

@@ -105,7 +105,7 @@ function dateBucket(ts: string): string {
 }
 
 /** Execute a query and return rows as objects. */
-function rowsToObjects(headers: string[], values: unknown[][]): Record<string, unknown>[] {
+function rowsToObjects(headers: string[], values: any[][]): Record<string, unknown>[] {
   return values.map((row) => {
     const obj: Record<string, unknown> = {};
     for (let i = 0; i < headers.length; i++) {
@@ -421,7 +421,7 @@ export class SignalStore {
 
     // Raw signal search
     let sql = `SELECT s.* FROM signals s WHERE s.timestamp >= ?`;
-    const params: unknown[] = [since];
+    const params: any[] = [since];
 
     if (query.ticker) {
       sql += ` AND s.ticker = ?`;
@@ -448,7 +448,7 @@ export class SignalStore {
 
   private _searchHourly(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
     let sql = `SELECT * FROM signal_hourly WHERE bucket_hour >= ?`;
-    const params: unknown[] = [since.slice(0, 16) + ":00"];
+    const params: any[] = [since.slice(0, 16) + ":00"];
 
     if (query.ticker) {
       sql += ` AND ticker = ?`;
@@ -473,7 +473,7 @@ export class SignalStore {
 
   private _searchDaily(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
     let sql = `SELECT * FROM signal_daily WHERE bucket_date >= ?`;
-    const params: unknown[] = [since.slice(0, 10)];
+    const params: any[] = [since.slice(0, 10)];
 
     if (query.ticker) {
       sql += ` AND ticker = ?`;
@@ -552,7 +552,7 @@ export class SignalStore {
   getSectorSignals(sector?: string, sinceMinutes?: number, impact?: string): Record<string, unknown>[] {
     const db = this.assertReady();
     let sql = `SELECT * FROM sector_signals WHERE 1=1`;
-    const params: unknown[] = [];
+    const params: any[] = [];
     if (sector) { sql += ` AND sector = ?`; params.push(sector); }
     if (sinceMinutes !== undefined) {
       sql += ` AND timestamp >= ?`;
@@ -587,7 +587,7 @@ export class SignalStore {
   getMacroEvents(eventType?: string, sinceMinutes?: number): Record<string, unknown>[] {
     const db = this.assertReady();
     let sql = `SELECT * FROM macro_events WHERE 1=1`;
-    const params: unknown[] = [];
+    const params: any[] = [];
     if (eventType) { sql += ` AND event_type = ?`; params.push(eventType); }
     if (sinceMinutes !== undefined) {
       sql += ` AND timestamp >= ?`;
@@ -634,7 +634,7 @@ export class SignalStore {
        VALUES (?, ?, ?, ${placeholders})
        ON CONFLICT(ticker, as_of_date, source) DO UPDATE SET
          ${setClauses.join(", ")}`,
-      [sym, asOfDate, source, ...values]
+      [sym, asOfDate, source, ...values] as any
     );
     this.ensureTicker(sym);
     this._save();
@@ -692,7 +692,7 @@ export class SignalStore {
     const sym = ticker.toUpperCase();
 
     let sql = `SELECT * FROM corporate_events WHERE ticker = ?`;
-    const params: unknown[] = [sym];
+    const params: any[] = [sym];
 
     if (sinceMinutes !== undefined) {
       const since = new Date(Date.now() - sinceMinutes * 60000).toISOString();
