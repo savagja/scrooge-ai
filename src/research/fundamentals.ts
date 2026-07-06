@@ -1,15 +1,17 @@
 /**
- * Fundamentals refresh — fetches company financial data and technical indicators
- * on independent schedules (daily, weekly, quarterly) and writes to the Research DB.
+ * Fundamentals refresh — fetches company data and technical indicators
+ * on independent schedules and writes to the Research DB.
  *
- * All computation is deterministic. The agent reads through search_signals tools.
- * No LLM involvement in data collection.
+ * Sources:
+ * - Alpaca assets endpoint: sector, industry, name (daily)
+ * - Alpaca historical bars: SMA, RSI, volume averages, volatility (daily after close)
+ *
+ * Valuation data (P/E, market cap) are not currently available from free Alpaca/Yahoo
+ * endpoints. This is sufficient for the agent to reason about technical context.
  */
 
 import type { SignalStore } from "./db.js";
-import { getCurrentPrice } from "../execution/alpaca.js";
 
-const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 const ALPACA_DATA_URL = "https://data.alpaca.markets";
 
 function getAlpacaHeaders() {
@@ -23,92 +25,27 @@ function getAlpacaHeaders() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// YAHOO FINANCE QUOTE — Daily refresh: P/E, market cap, EPS, beta, sector
+// ALPACA ASSET INFO — Sector, industry, name (daily, fast)
 // ═══════════════════════════════════════════════════════════════════════════
 
-interface YahooQuoteResult {
-  marketCap: number | null;
-  peRatio: number | null;
-  forwardPe: number | null;
-  epsTtm: number | null;
-  beta: number | null;
+interface AlpacaAssetInfo {
   sector: string | null;
   industry: string | null;
   name: string | null;
 }
 
-async function fetchYahooQuote(symbol: string): Promise<YahooQuoteResult | null> {
+async function fetchAlpacaAsset(symbol: string): Promise<AlpacaAssetInfo | null> {
   try {
     const res = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`,
-      { headers: YAHOO_HEADERS }
+      `https://paper-api.alpaca.markets/v2/assets/${encodeURIComponent(symbol.toUpperCase())}`,
+      { headers: getAlpacaHeaders() }
     );
     if (!res.ok) return null;
     const data = await res.json();
-    const meta = data.chart?.result?.[0]?.meta;
-
-    if (!meta) return null;
-
-    // Yahoo chart meta doesn't include all fundamentals.
-    // For full data we'd use the /v10/finance/quoteSummary endpoint.
-    // Start with what's available from chart meta:
     return {
-      marketCap: meta.marketCap ?? null,
-      peRatio: meta.trailingPE ?? null,
-      forwardPe: meta.forwardPE ?? null,
-      epsTtm: null,  // Requires quoteSummary
-      beta: null,
-      sector: meta.sector ?? null,
-      industry: meta.industry ?? null,
-      name: meta.shortName ?? meta.longName ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Fetch richer fundamental data from Yahoo's quoteSummary endpoint.
- * More details but slower — run weekly, not daily.
- */
-async function fetchYahooStats(symbol: string): Promise<Record<string, unknown> | null> {
-  try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=financialData,defaultKeyStatistics,summaryDetail`,
-      { headers: YAHOO_HEADERS }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    const qs = data.quoteSummary?.result?.[0];
-    if (!qs) return null;
-
-    const fd = qs.financialData || {};
-    const ks = qs.defaultKeyStatistics || {};
-    const sd = qs.summaryDetail || {};
-
-    return {
-      marketCap: fd.marketCap?.raw ?? ks.marketCap?.raw ?? null,
-      peRatio: fd.currentPE?.raw ?? ks.peRatio?.raw ?? null,
-      forwardPe: fd.forwardPE?.raw ?? null,
-      psRatio: fd.priceToSalesTrailing12Months?.raw ?? null,
-      pbRatio: ks.priceToBook?.raw ?? null,
-      evToEbitda: ks.enterpriseToEbitda?.raw ?? null,
-      totalCash: ks.totalCash?.raw ?? null,
-      totalDebt: ks.totalDebt?.raw ?? null,
-      bookValue: ks.bookValue?.raw ?? null,
-      freeCashFlow: ks.freeCashflow?.raw ?? null,
-      currentRatio: ks.currentRatio?.raw ?? null,
-      debtToEquity: ks.debtToEquity?.raw ?? null,
-      revenueTtm: fd.totalRevenue?.raw ?? null,
-      grossMargin: fd.grossMargins?.raw ?? null,
-      operatingMargin: fd.operatingMargins?.raw ?? null,
-      netMargin: fd.profitMargins?.raw ?? null,
-      epsTtm: ks.trailingEps?.raw ?? fd.epsTrailingTwelveMonths?.raw ?? null,
-      epsGrowthYoy: ks.earningsQuarterlyGrowth?.raw ?? null,
-      revenueGrowthYoy: fd.revenueGrowth?.raw ?? null,
-      beta: ks.beta?.raw ?? sd.beta?.raw ?? null,
-      avgVolume20d: sd.averageVolume?.raw ?? null,
-      avgVolume50d: sd.averageVolume10days?.raw ?? null,
+      sector: data.sector ?? null,
+      industry: data.industry ?? null,
+      name: data.name ?? null,
     };
   } catch {
     return null;
@@ -131,7 +68,6 @@ interface TechnicalIndicators {
 
 async function computeTechnicalIndicators(symbol: string): Promise<TechnicalIndicators | null> {
   try {
-    // Fetch 200+ daily bars for SMA calculations
     const end = new Date().toISOString();
     const start = new Date(Date.now() - 300 * 86400000).toISOString();
 
@@ -148,23 +84,16 @@ async function computeTechnicalIndicators(symbol: string): Promise<TechnicalIndi
     const bars = data.bars || [];
     if (bars.length < 20) return null;
 
-    // Use complete bars only (exclude today if incomplete)
     const complete = bars.slice(0, -1);
     const closes = complete.map((b: any) => b.c);
     const volumes = complete.map((b: any) => b.v);
 
-    // SMAs
     const sma20 = computeSMA(closes, 20);
     const sma50 = computeSMA(closes, 50);
     const sma200 = computeSMA(closes, 200);
-
-    // RSI (14)
     const rsi14 = computeRSI(closes, 14);
-
-    // Volatility (30-day annualized)
     const vol30d = computeVolatility(closes, 30);
 
-    // Average volumes
     const avgVol20 = volumes.length >= 20
       ? volumes.slice(-20).reduce((a: number, b: number) => a + b, 0) / 20
       : null;
@@ -216,7 +145,7 @@ function computeVolatility(closes: number[], period: number): number | null {
   }
   const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
   const variance = returns.reduce((sum, r) => sum + (r - mean) ** 2, 0) / returns.length;
-  return Math.sqrt(variance) * Math.sqrt(252); // Annualized
+  return Math.sqrt(variance) * Math.sqrt(252);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,47 +159,30 @@ function computeVolatility(closes: number[], period: number): number | null {
 export async function refreshFundamentals(store: SignalStore, watchlist: string[]): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
 
-  // Helper: convert camelCase to snake_case for DB columns
-  function toSnake(data: Record<string, unknown>): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(data)) {
-      result[key.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())] = val;
-    }
-    return result;
-  }
-
-  // Phase 1: Quick daily quote data from Yahoo chart (fast, no API key)
-  const quotePromises = watchlist.slice(0, 50).map(async (sym) => {
-    const quote = await fetchYahooQuote(sym);
-    if (!quote) return;
-    const data = toSnake(quote as unknown as Record<string, unknown>);
-    store.upsertFundamentals(sym, today, "yahoo_finance", data);
-
-    // Update ticker metadata
-    if (quote.sector || quote.industry || quote.name) {
-      store.ensureTicker(sym, quote.name ?? undefined, quote.sector ?? undefined, quote.industry ?? undefined);
-    }
+  // Phase 1: Asset info from Alpaca (sector, industry, name) — fast, daily
+  const assetPromises = watchlist.slice(0, 50).map(async (sym) => {
+    const asset = await fetchAlpacaAsset(sym);
+    if (!asset) return;
+    store.ensureTicker(sym, asset.name ?? undefined, asset.sector ?? undefined, asset.industry ?? undefined);
   });
 
-  await Promise.allSettled(quotePromises);
+  await Promise.allSettled(assetPromises);
 
-  // Phase 2: Weekly stats — only on Sundays (day 0) or first run
-  const dayOfWeek = new Date().getDay();
-  if (dayOfWeek === 0) {
-    const statsPromises = watchlist.slice(0, 30).map(async (sym) => {
-      const stats = await fetchYahooStats(sym);
-      if (!stats) return;
-      store.upsertFundamentals(sym, today, "yahoo_finance", toSnake(stats as unknown as Record<string, unknown>));
-    });
-    await Promise.allSettled(statsPromises);
-    console.log(`[RESEARCH] Weekly stats refreshed for ${watchlist.length} tickers`);
-  }
-
-  // Phase 3: Technical indicators from Alpaca bars (daily)
+  // Phase 2: Technical indicators from Alpaca bars (daily)
   const techPromises = watchlist.slice(0, 50).map(async (sym) => {
     const tech = await computeTechnicalIndicators(sym);
     if (!tech) return;
-    const data = toSnake(tech as unknown as Record<string, unknown>);
+
+    // Convert camelCase to snake_case for DB columns
+    const data: Record<string, unknown> = {};
+    if (tech.avgVolume20d !== null) data.avg_volume_20d = tech.avgVolume20d;
+    if (tech.avgVolume50d !== null) data.avg_volume_50d = tech.avgVolume50d;
+    if (tech.sma20 !== null) data.sma_20 = tech.sma20;
+    if (tech.sma50 !== null) data.sma_50 = tech.sma50;
+    if (tech.sma200 !== null) data.sma_200 = tech.sma200;
+    if (tech.rsi14 !== null) data.rsi_14 = tech.rsi14;
+    if (tech.volatility30d !== null) data.volatility_30d = tech.volatility30d;
+
     store.upsertFundamentals(sym, today, "alpaca_bars", data);
   });
 
