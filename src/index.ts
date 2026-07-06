@@ -459,6 +459,9 @@ async function buildPerceptionPrompt(
   ];
 
   if (positions.length > 0) {
+    // Fetch strategies for position linkage
+    const strategyStore = new StrategyStore("data/strategies.db");
+
     // Run exit condition checks AND fetch ticker context for each position in parallel
     const { getCurrentPrice } = await import("./execution/alpaca.js");
 
@@ -483,9 +486,13 @@ async function buildPerceptionPrompt(
     );
     const exitMap = new Map(exitChecks.map(e => [e.symbol, e]));
 
-    // Build ticker context for each position
+    // Build ticker context for each position, enriched with linked strategy data
     const contextPromises = positions.map(p => {
       const exit = exitMap.get(p.symbol);
+      // Find the linked strategy for this position
+      const tickerStrategies = strategyStore.getByTicker(p.symbol, 3);
+      const linkedStrategy = tickerStrategies.find((s: Strategy) => s.state === "active" || s.state === "realized");
+
       return buildTickerContext({
         symbol: p.symbol,
         entryPrice: p.entryPrice,
@@ -504,6 +511,17 @@ async function buildPerceptionPrompt(
         strategy: p.strategy,
         currentRegime: market.regime,
         currentVix: market.vix,
+      }).then(contextLines => {
+        // Append linked strategy data to each position's context block
+        if (linkedStrategy) {
+          contextLines.push("─ LINKED STRATEGY ─");
+          contextLines.push(`  type: ${linkedStrategy.strategy_type} | state: ${linkedStrategy.state} | confidence: ${(linkedStrategy.confidence * 100).toFixed(0)}%`);
+          contextLines.push(`  thesis: ${linkedStrategy.thesis.slice(0, 200)}`);
+          if (linkedStrategy.catalyst) contextLines.push(`  catalyst: ${linkedStrategy.catalyst.slice(0, 120)}`);
+          if (linkedStrategy.risk_factors && linkedStrategy.risk_factors.length > 0)
+            contextLines.push(`  risk factors: ${linkedStrategy.risk_factors.slice(0, 3).join(", ")}`);
+        }
+        return contextLines;
       });
     });
 
@@ -516,7 +534,7 @@ async function buildPerceptionPrompt(
 
     lines.push("");
     lines.push("═══ DECISION ═══");
-    lines.push("Above is the full mult-timeframe context for each open position. Key questions:");
+    lines.push("Above is the full multi-timeframe context for each open position. Key questions:");
     lines.push("  • If the position is nearing a stop (trailing or hard) → place_sell_order");
     lines.push("  • If thesis invalidated (regime changed, catalyst dead) but stops haven't hit → close_position to self-evaluate, then place_sell_order");
     lines.push("  • If thesis confirmed and working → let the stop ride, do nothing");
@@ -534,41 +552,37 @@ async function buildPerceptionPrompt(
     lines.push(ctxNotes);
   }
 
-  // ── STRATEGY INJECTION — Top 10 from strategist + position-linked ──────
+  // ── STRATEGY INJECTION — Top 10 candidates with full ticker context ──
   const strategyStore = new StrategyStore("data/strategies.db");
   const topStrategies = strategyStore.getTopStrategies(10);
-  const positionStrategies: Strategy[] = [];
-  for (const pos of positions) {
-    const tickerStrategies = strategyStore.getByTicker(pos.symbol, 3);
-    const linked = tickerStrategies.find((s: Strategy) => s.state === "active" || s.state === "realized");
-    if (linked) positionStrategies.push(linked);
-  }
 
-  if (positionStrategies.length > 0 || topStrategies.length > 0) {
+  if (topStrategies.length > 0) {
     lines.push("");
-    lines.push("═══ STRATEGIES FROM STRATEGIST ═══");
+    lines.push("═══ CANDIDATE STRATEGIES (with real-time price context) ═══");
 
-    if (positionStrategies.length > 0) {
-      lines.push("POSITION-LINKED STRATEGIES (check if thesis still holds):");
-      for (const s of positionStrategies) {
-        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
-        lines.push("    Thesis: " + s.thesis.slice(0, 200));
-        if (s.catalyst) lines.push("    Catalyst: " + s.catalyst.slice(0, 100));
-        if (s.risk_factors.length > 0) lines.push("    Risk: " + s.risk_factors.slice(0, 3).join(", "));
+    for (const s of topStrategies) {
+      // Fetch compact ticker context (no RISK/THESIS sections since there's no position)
+      let priceLines: string[] = [];
+      try {
+        priceLines = await buildTickerContext({ symbol: s.ticker });
+      } catch {
+        priceLines = [`  (Price data unavailable for ${s.ticker})`];
       }
-    }
 
-    if (topStrategies.length > 0) {
-      lines.push("TOP CANDIDATE STRATEGIES (consider for entry):");
-      for (const s of topStrategies) {
-        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.direction + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
-        lines.push("    " + s.thesis.slice(0, 200));
-        if (s.catalyst) lines.push("    Cat: " + s.catalyst.slice(0, 100));
-        if (s.timeframe) lines.push("    TF: " + s.timeframe);
-      }
+      // Output: separator → strategy header → strategy metadata → remaining price context
       lines.push("");
-      lines.push("Use get_active_strategies for full details on any of these.");
+      lines.push(priceLines[0]); // ═══ separator line
+      lines.push(`CANDIDATE: [${s.ticker}] ${s.direction.toUpperCase()} ${s.strategy_type} | ${s.state} @ ${(s.confidence * 100).toFixed(0)}% confidence`);
+      lines.push(`  thesis: ${s.thesis.slice(0, 200)}`);
+      if (s.catalyst) lines.push(`  catalyst: ${s.catalyst.slice(0, 120)}`);
+      if (s.timeframe) lines.push(`  timeframe: ${s.timeframe}`);
+      if (s.rationale) lines.push(`  rationale: ${s.rationale.slice(0, 200)}`);
+      // Append remaining price action lines (skip the original "TICKER:" header)
+      lines.push(...priceLines.slice(2));
     }
+  } else {
+    lines.push("");
+    lines.push("═══ NO CANDIDATE STRATEGIES — strategist hasn't identified any setups yet ═══");
   }
 
   // ── PRE-DIGESTED CONTEXT ─────────────────────────────────────────────────
