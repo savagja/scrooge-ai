@@ -13,6 +13,40 @@ import { dirname } from "path";
 import crypto from "crypto";
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Major sector ETFs for tracking sector rotation
+const SECTOR_ETFS: Record<string, string> = {
+  "XLF": "Financials",
+  "XLK": "Technology",
+  "XLE": "Energy",
+  "XLV": "Health Care",
+  "XLI": "Industrials",
+  "XLP": "Consumer Staples",
+  "XLY": "Consumer Discretionary",
+  "XLU": "Utilities",
+  "XLB": "Materials",
+  "XLRE": "Real Estate",
+  "SMH": "Semiconductors",
+  "IBB": "Biotechnology",
+  "ARKK": "Innovation/Cathie Wood",
+  "GDX": "Gold Miners",
+  "SLV": "Silver",
+  "TLT": "Long-Term Treasuries",
+  "HYG": "High-Yield Bonds",
+  "KWEB": "China Internet",
+  "EEM": "Emerging Markets",
+  "SPY": "S&P 500",
+  "QQQ": "Nasdaq",
+  "IWM": "Russell 2000 (Small Cap)",
+  "DIA": "Dow Jones",
+  "VXX": "VIX Short-Term Futures",
+};
+
+export { SECTOR_ETFS };
+
+// ═══════════════════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -131,6 +165,36 @@ const SCHEMA_SQL = [
     source_ct   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ticker, source, bucket_date)
   )`,
+  `CREATE TABLE IF NOT EXISTS sector_signals (
+    id          TEXT PRIMARY KEY,
+    sector      TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    headline    TEXT,
+    score       REAL NOT NULL DEFAULT 0.5,
+    direction   REAL NOT NULL DEFAULT 0,
+    impact      TEXT  -- "high" | "medium" | "low"
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ss_sector ON sector_signals(sector)`,
+  `CREATE INDEX IF NOT EXISTS idx_ss_ts ON sector_signals(timestamp)`,
+  `CREATE INDEX IF NOT EXISTS idx_ss_source ON sector_signals(source)`,
+  `CREATE TABLE IF NOT EXISTS macro_events (
+    id          TEXT PRIMARY KEY,
+    event_type  TEXT NOT NULL,  -- "cpi" | "fomc" | "nfp" | "ppi" | "tariff" | "regulation" | "other"
+    headline    TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    impact      TEXT,  -- "high" | "medium" | "low"
+    payload     TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_me_type ON macro_events(event_type)`,
+  `CREATE INDEX IF NOT EXISTS idx_me_ts ON macro_events(timestamp)`,
+  `CREATE VIEW IF NOT EXISTS v_cross_sector AS
+   SELECT timestamp, sector, source, headline, score, direction
+   FROM sector_signals
+   WHERE impact = 'high'
+   ORDER BY timestamp DESC
+   LIMIT 100`,
   `CREATE TABLE IF NOT EXISTS fundamentals (
     ticker             TEXT NOT NULL,
     as_of_date         TEXT NOT NULL,
@@ -169,6 +233,10 @@ const SCHEMA_SQL = [
           SUM(bullish_ct) AS total_bullish,
           SUM(bearish_ct) AS total_bearish
    FROM signal_daily GROUP BY bucket_date, ticker`,
+  `CREATE TABLE IF NOT EXISTS _internal (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`,
 ];
 
 const RETENTION_RAW_MS = 14 * 86400_000;
@@ -185,6 +253,17 @@ export class SignalStore {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private dirty = false;
   private initDone = false;
+  private meta: Record<string, string> = {};
+
+  /** Internal metadata store for cursor tracking across restarts. */
+  _getMeta(key: string): string | null {
+    return this.meta[key] ?? null;
+  }
+
+  /** Internal metadata setter for cursor tracking. */
+  _setMeta(key: string, value: string): void {
+    this.meta[key] = value;
+  }
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -209,6 +288,14 @@ export class SignalStore {
     // Persist empty schema to disk
     this.flush();
     this.initDone = true;
+
+    // Load internal metadata from _internal table
+    const metaResult = this.db.exec(`SELECT key, value FROM _internal`);
+    if (metaResult.length > 0) {
+      for (const row of metaResult[0].values) {
+        this.meta[String(row[0])] = String(row[1]);
+      }
+    }
   }
 
   flush(): void {
@@ -437,7 +524,101 @@ export class SignalStore {
     return rowsToObjects(result[0].columns, result[0].values);
   }
 
-  // ── FUNDAMENTALS ───────────────────────────────────────────────────────
+  // ── SECTOR SIGNALS ──────────────────────────────────────────────────────
+
+  /**
+   * Sector-level and macro signals (Fed, Treasury, sector rotation, political news).
+   * Not scoped to a single ticker — scoped to a sector, asset class, or "macro"/"political".
+   */
+  recordSectorSignal(params: {
+    sector: string;
+    source: SignalSource | "sector_rotation" | "macro_event" | "political_news" | "sector_news";
+    headline: string;
+    score?: number;
+    direction?: number;  // 1 = bullish for the sector, -1 = bearish, 0 = neutral
+    impact?: "high" | "medium" | "low";
+  }): void {
+    const db = this.assertReady();
+    const id = uuid();
+    db.run(
+      `INSERT INTO sector_signals (id, sector, source, timestamp, headline, score, direction, impact)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, params.sector, params.source, new Date().toISOString(), params.headline,
+       params.score ?? 0.5, params.direction ?? 0, params.impact ?? "medium"]
+    );
+    this._save();
+  }
+
+  getSectorSignals(sector?: string, sinceMinutes?: number, impact?: string): Record<string, unknown>[] {
+    const db = this.assertReady();
+    let sql = `SELECT * FROM sector_signals WHERE 1=1`;
+    const params: unknown[] = [];
+    if (sector) { sql += ` AND sector = ?`; params.push(sector); }
+    if (sinceMinutes !== undefined) {
+      sql += ` AND timestamp >= ?`;
+      params.push(new Date(Date.now() - sinceMinutes * 60000).toISOString());
+    }
+    if (impact) { sql += ` AND impact = ?`; params.push(impact); }
+    sql += ` ORDER BY timestamp DESC LIMIT 100`;
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  // ── MACRO EVENTS ────────────────────────────────────────────────────────
+
+  recordMacroEvent(params: {
+    eventType: string;
+    headline: string;
+    impact?: string;
+    payload?: Record<string, unknown>;
+  }): void {
+    const db = this.assertReady();
+    const id = uuid();
+    db.run(
+      `INSERT INTO macro_events (id, event_type, headline, timestamp, source, impact, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, params.eventType, params.headline, new Date().toISOString(), "macro_calendar",
+       params.impact ?? "medium", params.payload ? JSON.stringify(params.payload) : null]
+    );
+    this._save();
+  }
+
+  getMacroEvents(eventType?: string, sinceMinutes?: number): Record<string, unknown>[] {
+    const db = this.assertReady();
+    let sql = `SELECT * FROM macro_events WHERE 1=1`;
+    const params: unknown[] = [];
+    if (eventType) { sql += ` AND event_type = ?`; params.push(eventType); }
+    if (sinceMinutes !== undefined) {
+      sql += ` AND timestamp >= ?`;
+      params.push(new Date(Date.now() - sinceMinutes * 60000).toISOString());
+    }
+    sql += ` ORDER BY timestamp DESC LIMIT 50`;
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
+  /** Get latest sector rotation data (which sectors are hot/cold). */
+  getSectorRotation(sinceMinutes?: number): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const since = new Date(Date.now() - (sinceMinutes ?? 1440) * 60000).toISOString();
+    // Returns aggregate of sector signals grouped by sector, ordered by volume of activity
+    const result = db.exec(
+      `SELECT sector, COUNT(*) AS signal_count,
+              AVG(score) AS avg_score,
+              SUM(CASE WHEN direction > 0 THEN 1 ELSE 0 END) AS bullish,
+              SUM(CASE WHEN direction < 0 THEN 1 ELSE 0 END) AS bearish
+       FROM sector_signals
+       WHERE timestamp >= ?
+       GROUP BY sector
+       ORDER BY signal_count DESC
+       LIMIT 30`,
+      [since]
+    );
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
 
   upsertFundamentals(ticker: string, asOfDate: string, source: string, data: Record<string, unknown>): void {
     const db = this.assertReady();
@@ -604,7 +785,7 @@ export class SignalStore {
 
   getTableInfo(): TableInfo[] {
     const db = this.assertReady();
-    const tables = ["tickers", "signals", "signal_hourly", "signal_daily", "fundamentals", "corporate_events"];
+    const tables = ["tickers", "signals", "signal_hourly", "signal_daily", "fundamentals", "corporate_events", "sector_signals", "macro_events"];
     const info: TableInfo[] = [];
 
     for (const name of tables) {
@@ -632,6 +813,8 @@ export class SignalStore {
       ["signal_daily", "bucket_date"],
       ["fundamentals", "as_of_date"],
       ["corporate_events", "event_date"],
+      ["sector_signals", "timestamp"],
+      ["macro_events", "timestamp"],
     ];
 
     for (const [table, col] of queries) {

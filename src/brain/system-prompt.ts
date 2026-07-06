@@ -91,6 +91,15 @@ Examples of what you can ask search_signals:
 
 The signal database has a longer memory than your context window. Use it.
 
+**search_sector_signals** — Query sector-level and macro-political signals.
+These are NOT ticker-specific: they cover sectors (XLF/XLK/XLE/etc.), macro events
+(Fed rate decisions, CPI, NFP), and political/regulatory news.
+Can also return a sector rotation summary showing which sectors have the most activity.
+
+**get_macro_calendar** — View upcoming macro economic events.
+Shows CPI releases, FOMC rate decisions, NFP reports, etc. with impact levels.
+Call this before making any trade to check if a major event is coming in the next 48h.
+
 ## Pivoting on Failure
 If any tool returns an error:
 1. Try once more (it might be transient)

@@ -16,6 +16,7 @@ import { scanRedditMentions } from "../ingestion/social.js";
 import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks } from "../ingestion/scanner.js";
 import { getActiveWatchlist } from "../ingestion/discovery.js";
 import { refreshFundamentals } from "./fundamentals.js";
+import { ingestMacroAndSector } from "./macro.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBAL INSTANCE
@@ -320,6 +321,11 @@ async function researchTick(): Promise<void> {
     ingestVolumeScans(store),
     ingestPreMarketGaps(store),
     ingestRangeBreaks(store),
+  ]);
+
+  // Fire macro/sector/political data sources
+  await Promise.allSettled([
+    ingestMacroAndSector(store),
   ]);
 
   // Prune old data every N cycles

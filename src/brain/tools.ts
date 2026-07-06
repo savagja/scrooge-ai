@@ -1665,6 +1665,18 @@ export const describeDatasetsTool = defineTool({
       }
     }
 
+    // Also show sector/macro counts
+    const sectorCount = tables.find((t) => t.name === "sector_signals")?.rowCount ?? 0;
+    const macroCount = tables.find((t) => t.name === "macro_events")?.rowCount ?? 0;
+    if (sectorCount > 0 || macroCount > 0) {
+      lines.push("");
+      lines.push("SECTOR & MACRO DATA:");
+      if (sectorCount > 0) lines.push(`  sector_signals: ${sectorCount} events (Fed, sector rotation, political news)`);
+      if (macroCount > 0) lines.push(`  macro_events: ${macroCount} events (CPI, FOMC, NFP calendar)`);
+      lines.push("");
+      lines.push("  Use search_sector_signals and get_macro_calendar tools to query these.");
+    }
+
     return {
       content: [{ type: "text", text: lines.join("\n") }],
       details: { tables, dateRanges, sourceBreakdown },
@@ -1673,6 +1685,97 @@ export const describeDatasetsTool = defineTool({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ─── TOOL: search_sector_signals ─────────────────────────────────────────
+
+export const searchSectorSignalsTool = defineTool({
+  name: "search_sector_signals",
+  label: "Search Sector & Macro Signals",
+  description:
+    "Query the research database for sector-level and macro-political signals. " +
+    "These are NOT ticker-specific — they cover sectors (XLF, XLK, XLE, etc.), " +
+    "macro events (Fed rate decisions, CPI, NFP), and political/regulatory news. " +
+    "Useful for understanding sector rotation, macro headwinds/tailwinds, and " +
+    "regulatory environment. Also use get_macro_calendar for upcoming events.",
+  parameters: Type.Object({
+    sector: Type.Optional(Type.String({ description: "Filter to one sector (e.g., 'Technology', 'Financials', 'macro', 'political'). Omit for all." })),
+    sinceMinutes: Type.Optional(NumStr),
+    impact: Type.Optional(Type.String({ description: "Filter by impact level: 'high', 'medium', 'low'" })),
+  }),
+  execute: async (_id, params) => {
+    const store = getSignalStore();
+    const results = store.getSectorSignals(params.sector,
+      params.sinceMinutes ? Number(params.sinceMinutes) : 1440,
+      params.impact);
+
+    const lines: string[] = ["🏢 SECTOR & MACRO SIGNALS:", ""];
+    if (results.length === 0) {
+      lines.push("No sector/macro signals found.");
+    } else {
+      for (const r of results.slice(0, 50)) {
+        const ts = String(r.timestamp || "").slice(0, 19);
+        const impact = String(r.impact || "").toUpperCase();
+        const dir = Number(r.direction) > 0 ? "🟢" : Number(r.direction) < 0 ? "🔴" : "⚪";
+        lines.push(`  ${dir} [${r.sector}] ${r.headline?.toString().slice(0, 100)}`);
+        lines.push(`     ${r.source} | impact: ${impact} | score: ${Number(r.score).toFixed(2)} | ${ts}`);
+      }
+    }
+
+    // Also show sector rotation summary if querying all
+    if (!params.sector) {
+      const rotation = store.getSectorRotation(params.sinceMinutes ? Number(params.sinceMinutes) : 1440);
+      if (rotation.length > 0) {
+        lines.push("", "SECTOR ROTATION (activity in last 24h):");
+        for (const r of rotation.slice(0, 10)) {
+          lines.push(`  ${r.sector}: ${r.signal_count} signals | bullish: ${r.bullish} bearish: ${r.bearish} | avg score: ${Number(r.avg_score).toFixed(2)}`);
+        }
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      details: { count: results.length, results, rotation: !params.sector ? store.getSectorRotation() : undefined },
+    };
+  },
+});
+
+// ─── TOOL: get_macro_calendar ────────────────────────────────────────────
+
+export const getMacroCalendarTool = defineTool({
+  name: "get_macro_calendar",
+  label: "Get Macro Economic Calendar",
+  description:
+    "View upcoming macro economic events from the research database: " +
+    "CPI releases, FOMC rate decisions, NFP (jobs) reports, PPI, etc. " +
+    "Events are pre-loaded from a quarterly schedule. " +
+    "Use this to understand upcoming macro risk before making trading decisions.",
+  parameters: Type.Object({
+    eventType: Type.Optional(Type.String({ description: "Filter by type: 'cpi', 'fomc', 'nfp', 'ppi', 'tariff', 'regulation'" })),
+    sinceMinutes: Type.Optional(NumStr),
+  }),
+  execute: async (_id, params) => {
+    const store = getSignalStore();
+    const results = store.getMacroEvents(params.eventType,
+      params.sinceMinutes ? Number(params.sinceMinutes) : 7 * 24 * 60);  // Default: 7 days
+
+    const lines: string[] = ["📅 MACRO ECONOMIC CALENDAR:", ""];
+    if (results.length === 0) {
+      lines.push("No upcoming macro events found.");
+    } else {
+      for (const r of results.slice(0, 30)) {
+        const ts = String(r.timestamp || "").slice(0, 19);
+        const impact = String(r.impact || "").toUpperCase();
+        lines.push(`  ${impact === "HIGH" ? "🔴" : impact === "MEDIUM" ? "🟡" : "⚪"} [${r.event_type?.toString().toUpperCase()}] ${r.headline?.toString().slice(0, 120)}`);
+        lines.push(`     impact: ${impact} | ${ts}`);
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      details: { count: results.length, results },
+    };
+  },
+});
 // ALL TOOLS EXPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1687,6 +1790,9 @@ export const allTradingTools = [
   scanRangeBreaksTool,
   scanRedditTool,
   discoverOpportunitiesTool,
+  // Sector/macro research
+  searchSectorSignalsTool,
+  getMacroCalendarTool,
   // Portfolio & execution
   checkPortfolioTool,
   monitorPositionsTool,
@@ -1708,4 +1814,6 @@ export const allTradingTools = [
   // Research engine — persistent signal database
   searchSignalsTool,
   describeDatasetsTool,
+  searchSectorSignalsTool,
+  getMacroCalendarTool,
 ];
