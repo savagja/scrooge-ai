@@ -8,7 +8,7 @@
  */
 
 import { SignalStore } from "./db.js";
-import { getConfig } from "../config.ts";
+import { getConfig } from "../config.js";
 import { scanYahooMarketMovers } from "../ingestion/discovery.js";
 import { fetchAllNews } from "../ingestion/expanded-news.js";
 import { fetchEdgarFilings, scoreFiling } from "../ingestion/edgar.js";

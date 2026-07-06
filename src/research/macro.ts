@@ -165,17 +165,142 @@ async function ingestMacroCalendar(store: SignalStore): Promise<void> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// EARNINGS CALENDAR — Extract earnings dates from available free sources
+// ═══════════════════════════════════════════════════════════════════════════
+// Sources:
+//   1. EDGAR 8-K Item 2.02 filings = earnings pre-announcements / results
+//   2. Alpaca News API headlines mentioning "earnings", "reports", "quarterly"
+//   3. Historical pattern: ~quarterly cadence from last filing
+
+const EARNINGS_KEYWORDS = [
+  "earnings", "quarterly results", "Q1", "Q2", "Q3", "Q4",
+  "reports", "reported", "financial results", "fiscal",
+  "quarter", "revenue", "profit", "EPS", "earnings call",
+];
+
+const DATA_URL = "https://data.alpaca.markets";
+
+interface AlpacaNewsItem {
+  id: number;
+  headline: string;
+  summary: string;
+  source: string;
+  symbols: string[];
+  created_at: string;
+}
+
+function getHeaders() {
+  const key = process.env.ALPACA_API_KEY;
+  const secret = process.env.ALPACA_SECRET_KEY;
+  if (!key || !secret) throw new Error("ALPACA_API_KEY and ALPACA_SECRET_KEY required");
+  return {
+    "APCA-API-KEY-ID": key,
+    "APCA-API-SECRET-KEY": secret,
+  };
+}
+
+async function fetchEarningsNews(): Promise<AlpacaNewsItem[]> {
+  try {
+    const start = new Date(Date.now() - 7 * 86400000).toISOString();
+    const url = new URL(`${DATA_URL}/v1beta1/news`);
+    url.searchParams.set("limit", "50");
+    url.searchParams.set("sort", "desc");
+    url.searchParams.set("start", start);
+
+    const res = await fetch(url.toString(), { headers: getHeaders() });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items: AlpacaNewsItem[] = (data.news || []);
+
+    // Filter to earnings-related headlines
+    return items.filter((item) => {
+      const text = (item.headline + " " + item.summary).toLowerCase();
+      return EARNINGS_KEYWORDS.some((kw) => text.includes(kw));
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function ingestEarningsCalendar(store: SignalStore): Promise<void> {
+  // 1. Fetch earnings-related news from Alpaca
+  const newsItems = await fetchEarningsNews();
+  for (const item of newsItems) {
+    if (item.symbols.length === 0) continue;
+    for (const sym of item.symbols) {
+      const text = (item.headline + " " + item.summary).toLowerCase();
+      // Score sentiment from headline
+      const bullish = ["beat", "surge", "raise", "record", "exceed", "grow", "profit"].some(w => text.includes(w));
+      const bearish = ["miss", "drop", "decline", "loss", "cut", "warn", "weak"].some(w => text.includes(w));
+      const impact = bullish ? 0.7 : bearish ? -0.7 : 0.3;
+
+      store.recordCorporateEvent({
+        ticker: sym,
+        eventDate: item.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10),
+        eventType: "earnings",
+        impact: Math.abs(impact),
+        details: {
+          headline: item.headline.slice(0, 200),
+          source: item.source,
+          sentiment: impact > 0 ? "positive" : impact < 0 ? "negative" : "neutral",
+        },
+        sourceUrl: `news:${item.id}`,
+      });
+
+      // Also record as a regular signal for the agent
+      store.recordSignal({
+        ticker: sym,
+        source: "alpaca_news",
+        score: Math.abs(impact),
+        direction: impact,
+        payload: {
+          type: "earnings_news",
+          headline: item.headline.slice(0, 200),
+        },
+      });
+    }
+  }
+
+  // 2. Check for upcoming earnings dates from recent EDGAR 8-K Item 2.02 filings
+  //    (Already recorded by edgar.ts — but we can flag them as earnings specific)
+  const recentCorpEvents = store._execSql?.(
+    `SELECT DISTINCT ticker, event_date, details FROM corporate_events
+     WHERE event_type = 'sec_filing'
+       AND details LIKE '%2.02%'
+       AND event_date >= date('now', '-90 days')
+     ORDER BY event_date DESC`
+  ) || [];
+
+  // If we had earnings news flagged above, it's already in corporate_events
+  const earningsCount = store._execSql?.(
+    `SELECT COUNT(*) as cnt FROM corporate_events WHERE event_type = 'earnings'`
+  );
+  if (earningsCount?.[0]?.cnt && Number(earningsCount[0].cnt) > 0) {
+    return; // Already recorded earnings events — skip duplicate tagging
+  }
+
+  // Tag qualifying 8-K filings as earnings events too
+  for (const filing of (recentCorpEvents as Record<string, unknown>[]) || []) {
+    const ticker = String(filing.ticker || "");
+    const eventDate = String(filing.event_date || "");
+    if (!ticker) continue;
+
+    store.recordCorporateEvent({
+      ticker,
+      eventDate,
+      eventType: "earnings",
+      impact: 0.5,
+      details: { source: "edgar_8k_item_2.02", note: "Earnings-related 8-K filing" },
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SECTOR ROTATION — Track sector ETF daily direction from Alpaca snapshots
 // ═══════════════════════════════════════════════════════════════════════════
-// When Alpaca data API becomes available, this can use real bars.
-// For now, it records a "data pending" placeholder so the agent knows
-// sector rotation tracking is coming.
 
 async function ingestSectorTracking(store: SignalStore): Promise<void> {
-  // Placeholder: note that sector rotation tracking requires data API access.
-  // This function will query Alpaca for sector ETF snapshots when the API
-  // supports it. For now, FYI.
-  // TODO: Implement when Alpaca data API credentials allow bars access.
+  // Placeholder — requires Alpaca data API bars access
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -190,5 +315,6 @@ export async function ingestMacroAndSector(store: SignalStore): Promise<void> {
     ingestFedRss(store),
     ingestMacroCalendar(store),
     ingestSectorTracking(store),
+    ingestEarningsCalendar(store),
   ]);
 }

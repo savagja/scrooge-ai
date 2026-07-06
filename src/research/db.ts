@@ -326,6 +326,17 @@ export class SignalStore {
     return this.db;
   }
 
+  /**
+   * Execute arbitrary SQL and return results as objects.
+   * Used by macro.ts for earnings tag queries.
+   */
+  _execSql(sql: string, params?: any[]): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const result = db.exec(sql, params);
+    if (result.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
   // ── TICKERS ─────────────────────────────────────────────────────────────
 
   ensureTicker(symbol: string, name?: string, sector?: string, industry?: string): void {
