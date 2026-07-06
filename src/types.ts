@@ -282,6 +282,65 @@ export interface DailyReport {
   markdown: string;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STRATEGY — Lifecycle-tracked hypotheses formed by the strategist
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type StrategyType =
+  | "value"
+  | "swing"
+  | "day_trade"
+  | "momentum"
+  | "event_driven"
+  | "mean_reversion";
+
+export type StrategyState =
+  | "anticipated"   // First sighting, low confidence, watching
+  | "developing"    // Thesis forming, 2+ signals converging
+  | "realized"      // Trader executed a position based on this strategy
+  | "active"        // Position is open and thesis still holds
+  | "failed"        // Thesis invalidated
+  | "stale";        // No updates in 48h, pending archival
+
+export interface Strategy {
+  id: string;
+  ticker: string;
+  strategy_type: StrategyType;
+  direction: "long" | "short";
+  state: StrategyState;
+
+  // Core thesis
+  thesis: string;           // One-sentence summary
+  catalyst: string | null;  // What specific event/condition triggered this
+  timeframe: string | null; // 'intraday', '1-3_days', '1-2_weeks', 'multi_week'
+
+  // Confidence
+  confidence: number;       // 0.0 to 1.0
+
+  // Reasoning trail
+  rationale: string;
+  key_signals: string[];    // Signal IDs from research.db that support this
+  risk_factors: string[];   // What could invalidate the thesis
+
+  // Lifecycle timing
+  created_at: string;
+  updated_at: string;
+  last_signal_at: string | null;
+
+  // Execution linkage
+  position_id: string | null;  // Links to a position in state.json if executed
+
+  // Outcome tracking
+  entry_price: number | null;
+  exit_price: number | null;
+  pnl: number | null;
+  pnl_pct: number | null;
+  exit_reason: string | null;
+
+  // Source attribution
+  created_by: "strategist" | "manual";
+}
+
 export interface PersistedState {
   cash: number;
   settledCash: number;

@@ -17,8 +17,10 @@ config();
 
 import { getConfig, reloadConfig, getTradingDate } from "./config.js";
 import { createTradingBrain } from "./brain/agent.js";
-import { setGlobalState, requireState, getWatchlist } from "./brain/tools.js";
+import { setGlobalState, setStrategyStore, requireState, getWatchlist } from "./brain/tools.js";
 import { PortfolioState } from "./state/portfolio.js";
+import { StrategyStore } from "./state/strategies.js";
+type Strategy = import("./types.js").Strategy;
 import { getAccount, getOpenPositions, getClock, buildTickerContext } from "./execution/alpaca.js";
 import { getVix, getSpyChange } from "./ingestion/market.js";
 import { buildMarketContext, formatContextForPrompt, buildPreMarketBriefing, resetContextHistory } from "./context/builder.js";
@@ -40,7 +42,21 @@ async function main(isRetry = false) {
 
     // Initialize state
     const state = new PortfolioState(cfg.initialCapital);
+    const strategies = new StrategyStore("data/strategies.db");
     setGlobalState(state, cfg.watchlist);
+    setStrategyStore(strategies);
+
+    // Check for positions without strategies
+    const positions = state.getPositions();
+    let unlinkedCount = 0;
+    for (const pos of positions) {
+      const existing = strategies.getByTicker(pos.symbol, 3);
+      const hasStrategy = existing.some(s => s.state === "active" || s.state === "realized" || s.state === "developing");
+      if (!hasStrategy) unlinkedCount++;
+    }
+    if (unlinkedCount > 0) {
+      console.log('⚠️  ' + unlinkedCount + ' position(s) without strategy links. The strategist will backfill on next cycle.');
+    }
 
     console.log('💰 Initial Capital: $' + cfg.initialCapital);
     console.log('🧪 Dry Run: ' + (cfg.execution.dryRun ? 'YES - no real trades' : 'NO'));
@@ -518,46 +534,73 @@ async function buildPerceptionPrompt(
     lines.push(ctxNotes);
   }
 
+  // ── STRATEGY INJECTION — Top 10 from strategist + position-linked ──────
+  const strategyStore = new StrategyStore("data/strategies.db");
+  const topStrategies = strategyStore.getTopStrategies(10);
+  const positionStrategies: Strategy[] = [];
+  for (const pos of positions) {
+    const tickerStrategies = strategyStore.getByTicker(pos.symbol, 3);
+    const linked = tickerStrategies.find((s: Strategy) => s.state === "active" || s.state === "realized");
+    if (linked) positionStrategies.push(linked);
+  }
+
+  if (positionStrategies.length > 0 || topStrategies.length > 0) {
+    lines.push("");
+    lines.push("═══ STRATEGIES FROM STRATEGIST ═══");
+
+    if (positionStrategies.length > 0) {
+      lines.push("POSITION-LINKED STRATEGIES (check if thesis still holds):");
+      for (const s of positionStrategies) {
+        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
+        lines.push("    Thesis: " + s.thesis.slice(0, 200));
+        if (s.catalyst) lines.push("    Catalyst: " + s.catalyst.slice(0, 100));
+        if (s.risk_factors.length > 0) lines.push("    Risk: " + s.risk_factors.slice(0, 3).join(", "));
+      }
+    }
+
+    if (topStrategies.length > 0) {
+      lines.push("TOP CANDIDATE STRATEGIES (consider for entry):");
+      for (const s of topStrategies) {
+        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.direction + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
+        lines.push("    " + s.thesis.slice(0, 200));
+        if (s.catalyst) lines.push("    Cat: " + s.catalyst.slice(0, 100));
+        if (s.timeframe) lines.push("    TF: " + s.timeframe);
+      }
+      lines.push("");
+      lines.push("Use get_active_strategies for full details on any of these.");
+    }
+  }
+
   // ── PRE-DIGESTED CONTEXT ─────────────────────────────────────────────────
   lines.push("");
   lines.push("═══ PRE-DIGESTED MARKET CONTEXT ═══");
   lines.push(formatContextForPrompt(ctx));
 
   lines.push("");
-  lines.push("═══ DEEPER DIVE TOOLS ═══");
-  lines.push("The context above is a snapshot. Use these tools to dive deeper on anything interesting:");
-  lines.push("  • search_signals — query the RESEARCH DB for signal history across sources (recommended first step)");
-  lines.push("  • search_sector_signals — sector, macro, and political/regulatory signals");
-  lines.push("  • get_macro_calendar — upcoming CPI, FOMC, NFP, PPI events");
-  lines.push("  • describe_datasets — see what data is in the research DB (schemas, row counts, date ranges)");
-  lines.push("  • fetch_news — full headlines for a specific ticker");
-  lines.push("  • fetch_all_news — ALL recent headlines (wider net)");
-  lines.push("  • fetch_edgar_filings — detailed SEC 8-K filings");
-  lines.push("  • scan_relative_volume — check if a move has volume confirmation");
-  lines.push("  • scan_premarket_gaps — gap analysis for specific tickers");
-  lines.push("  • scan_range_breaks — 20-day range analysis");
-  lines.push("  • scan_reddit — Reddit sentiment details");
-  lines.push("  • discover_opportunities — find NEW tickers outside current list");
-  lines.push("  • consult_memory — check accumulated lessons and similar past trades before deciding");
+  lines.push("═══ AVAILABLE TOOLS ═══");
+  lines.push("The strategist handles research. You execute:");
+  lines.push("  • get_active_strategies — see all strategies from the strategist");
+  lines.push("  • update_strategy_on_exit — record outcome when you close a position");
+  lines.push("  • search_signals — quick research DB check (use sparingly)");
+  lines.push("  • describe_datasets — see what data is in the research DB");
+  lines.push("  • fetch_news — quick headline check for a specific ticker");
+  lines.push("  • consult_memory — check lessons and similar past trades BEFORE any trade");
+  lines.push("  • monitor_positions — check all open positions' exit conditions");
+  lines.push("  • close_position — evaluate if a position's thesis still holds");
   lines.push("");
-  lines.push("💡 TIP: search_signals is faster than calling individual data sources. The research DB already has Yahoo movers, Reddit, EDGAR filings, volume spikes, gaps, and range breaks — all accumulated 24/7. Use search_sector_signals for macro/sector rotation context. Check get_macro_calendar before any trade.");
   lines.push("⚠️  IMPORTANT: The market is CURRENTLY OPEN. Alpaca clock confirms this.");
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
-  lines.push("    If you see a timestamp that looks late, ignore it — the event loop handles clock checks.");
-  lines.push("    Your job is to trade, not to decide when the market closes.");
-  lines.push("");
   lines.push("");
   lines.push("INSTRUCTION:");
-  lines.push("1. Review positions first — check if each original thesis still holds given current market conditions.");
-  lines.push("2. For thesis invalidation: use close_position to evaluate, then place_sell_order.");
-  lines.push("3. For mechanical exits: use monitor_positions to check stops, then place_sell_order.");
-  lines.push("4. Use the pre-digested context above. If something catches your eye, use ONE tool to verify.");
-  lines.push("5. Analyze tickers with trade_news_momentum or trade_mean_reversion if you see a setup.");
-  lines.push("6. **BEFORE any trade**, call consult_memory to check if past lessons and similar trades apply.");
-  lines.push("7. If you have a thesis → place_buy_order (long) or place_short_order (short).");
-  lines.push("8. If nothing passes your bar → hold_cash (explain why).");
-  lines.push("9. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
-  lines.push("10. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
+  lines.push("1. Review positions first — check if each position's linked strategy still holds.");
+  lines.push("2. Review the TOP CANDIDATE STRATEGIES above — these are pre-vetted by the strategist.");
+  lines.push("3. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
+  lines.push("4. For mechanical exits: monitor_positions → place_sell_order → update_strategy_on_exit.");
+  lines.push("5. **BEFORE any trade**, call consult_memory to check lessons and similar trades.");
+  lines.push("6. If a candidate strategy has a strong thesis + confirming price action → place_buy_order or place_short_order.");
+  lines.push("7. If nothing passes your bar → hold_cash (explain why).");
+  lines.push("8. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
+  lines.push("9. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
 
   return lines.join("\n");
 }

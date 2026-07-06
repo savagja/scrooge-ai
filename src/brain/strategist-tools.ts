@@ -1,0 +1,234 @@
+/**
+ * Strategist tools — research-only, no execution capabilities.
+ * Reuses shared research tools from tools.ts and adds strategy management.
+ */
+
+import { Type } from "@sinclair/typebox";
+import { defineTool, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+
+function coerceNumber(val: unknown, fallback: number): number {
+  if (typeof val === "number") return val;
+  if (typeof val === "string") { const n = Number(val); if (!isNaN(n)) return n; }
+  return fallback;
+}
+const NumStr = Type.Any();
+
+import { PortfolioState } from "../state/portfolio.js";
+import { StrategyStore } from "../state/strategies.js";
+import type { StrategyType } from "../types.js";
+
+// ── Shared state ──────────────────────────────────────────────────────────
+
+let _state: PortfolioState;
+let _strategies: StrategyStore;
+export function setStrategistState(state: PortfolioState, strategies: StrategyStore) {
+  _state = state; _strategies = strategies;
+}
+function requireState(): PortfolioState { if (!_state) throw new Error("State not initialized."); return _state; }
+function requireStrategies(): StrategyStore { if (!_strategies) throw new Error("Strategies not initialized."); return _strategies; }
+
+function text(text: string): AgentToolResult<unknown> {
+  return { content: [{ type: "text", text }], details: {} };
+}
+
+// ── Re-export shared research tools from tools.ts ────────────────────────
+
+import {
+  fetchMarketDataTool as _fmd, fetchNewsTool as _fn, fetchAllNewsTool as _fan,
+  fetchEdgarFilingsTool as _fef, scanRelativeVolumeTool as _srv,
+  scanPreMarketGapsTool as _spg, scanRangeBreaksTool as _srb,
+  scanRedditTool as _sr, discoverOpportunitiesTool as _do,
+  searchSignalsTool as _ss, describeDatasetsTool as _dd,
+} from "./tools.js";
+
+export const fetchMarketDataTool = _fmd;
+export const fetchNewsTool = _fn;
+export const fetchAllNewsTool = _fan;
+export const fetchEdgarFilingsTool = _fef;
+export const scanRelativeVolumeTool = _srv;
+export const scanPreMarketGapsTool = _spg;
+export const scanRangeBreaksTool = _srb;
+export const scanRedditTool = _sr;
+export const discoverOpportunitiesTool = _do;
+export const searchSignalsTool = _ss;
+export const describeDatasetsTool = _dd;
+
+// ── Strategist-only: consult_memory (read-only) ───────────────────────────
+
+export const consultMemoryTool = defineTool({
+  name: "consult_memory", label: "Consult Memory",
+  description: "Search accumulated trade history and lessons for similar past setups. Read-only.",
+  parameters: Type.Object({
+    vix: Type.Optional(NumStr), regime: Type.Optional(Type.String()),
+    confidence: Type.Optional(NumStr), impactScore: Type.Optional(NumStr),
+  }),
+  execute: async (_id: string, params: any) => {
+    const state = requireState();
+    const fv = state.buildLessonFeatureVector({
+      vix: params.vix !== undefined ? coerceNumber(params.vix, 18) : 18,
+      regime: params.regime ?? "unknown",
+      confidence: params.confidence !== undefined ? coerceNumber(params.confidence, 0.5) : 0.5,
+      impactScore: params.impactScore !== undefined ? coerceNumber(params.impactScore, 0) : 0,
+      notional: 50,
+    });
+    const similar = state.findSimilarTrades(fv, 5);
+    const lessons = state.findRelevantLessons(fv, 3);
+    const lines: string[] = ["=== MEMORY CONSULTATION ==="];
+    if (similar.length > 0) {
+      lines.push("Similar trades:");
+      for (const s of similar) lines.push("  " + s.symbol + " " + (s.outcome === "win" ? "WIN" : "LOSS") + " (" + s.pnlPct.toFixed(1) + "%) sim: " + (s.similarity * 100).toFixed(0) + "%");
+    } else { lines.push("No similar trades."); }
+    if (lessons.length > 0) {
+      lines.push("Lessons:");
+      for (const l of lessons) lines.push("  [" + l.category + "] " + l.insight.slice(0, 150));
+    }
+    return text(lines.join("\n"));
+  },
+});
+
+// ── Strategist-only: sector / macro tools ─────────────────────────────────
+
+import { getSignalStore } from "../research/index.js";
+
+export const searchSectorSignalsTool = defineTool({
+  name: "search_sector_signals", label: "Search Sector Signals",
+  description: "Query sector-level, macro-economic, and political/regulatory signals.",
+  parameters: Type.Object({
+    since_minutes: Type.Optional(NumStr),
+    sources: Type.Optional(Type.Array(Type.String())),
+  }),
+  execute: async (_id: string, params: any) => {
+    const store = getSignalStore();
+    if (!store) return text("Research DB not available.");
+    const results = store.getMacroEvents(
+      params.sources?.join(",") ?? undefined,
+      coerceNumber(params.since_minutes, 1440)
+    );
+    if (!results || results.length === 0) return text("No sector signals found.");
+    const lines = ["SECTOR/MACRO SIGNALS:"];
+    for (const r of results) {
+      lines.push("  " + (r.event_type ?? "?"));
+    }
+    return text(lines.join("\n"));
+  },
+});
+
+export const getMacroCalendarTool = defineTool({
+  name: "get_macro_calendar", label: "Get Macro Calendar",
+  description: "View upcoming macro-economic events (CPI, FOMC, NFP, PPI) with impact levels.",
+  parameters: Type.Object({ days_ahead: Type.Optional(NumStr) }),
+  execute: async (_id: string, params: any) => {
+    const store = getSignalStore();
+    if (!store) return text("Research DB not available.");
+    const events = store.getMacroEvents("macro", coerceNumber(params.days_ahead, 14) * 1440);
+    if (!events || events.length === 0) return text("No upcoming macro events.");
+    const lines = ["UPCOMING MACRO EVENTS:"];
+    for (const e of events) {
+      const details = typeof e.details === "string" ? JSON.parse(e.details) : (e.details ?? {});
+      const impact = (details as any).impact ?? "medium";
+      lines.push("  " + (impact === "high" ? "HIGH" : impact === "medium" ? "MED" : "LOW") + " " + (e.event_type ?? "?"));
+    }
+    return text(lines.join("\n"));
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRATEGY MANAGEMENT TOOLS (strategist-only)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const createStrategyTool = defineTool({
+  name: "create_strategy", label: "Create Strategy",
+  description: "Store a new trading strategy with thesis, confidence, and lifecycle state.",
+  parameters: Type.Object({
+    ticker: Type.String(),
+    strategy_type: Type.String(),
+    direction: Type.Optional(Type.String()),
+    thesis: Type.String(),
+    catalyst: Type.Optional(Type.String()),
+    timeframe: Type.Optional(Type.String()),
+    confidence: Type.Optional(NumStr),
+    rationale: Type.Optional(Type.String()),
+    key_signals: Type.Optional(Type.Array(Type.String())),
+    risk_factors: Type.Optional(Type.Array(Type.String())),
+    state: Type.Optional(Type.String()),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const s = requireStrategies().create({
+        ticker: params.ticker.toUpperCase(),
+        strategy_type: params.strategy_type as StrategyType,
+        direction: (params.direction as "long" | "short") ?? "long",
+        thesis: params.thesis,
+        catalyst: params.catalyst ?? null,
+        timeframe: params.timeframe ?? null,
+        confidence: params.confidence !== undefined ? coerceNumber(params.confidence, 0.1) : 0.1,
+        rationale: params.rationale ?? "",
+        key_signals: params.key_signals ?? [],
+        risk_factors: params.risk_factors ?? [],
+        state: params.state ?? "anticipated",
+      });
+      return text("Created: " + s.id.slice(0, 16) + " (" + s.ticker + " " + s.strategy_type + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%)");
+    } catch (e: any) { return text("Error: " + e.message); }
+  },
+});
+
+export const updateStrategyTool = defineTool({
+  name: "update_strategy", label: "Update Strategy",
+  description: "Update an existing strategy's state, confidence, thesis, or other fields.",
+  parameters: Type.Object({
+    strategy_id: Type.String(),
+    state: Type.Optional(Type.String()),
+    confidence: Type.Optional(NumStr),
+    thesis: Type.Optional(Type.String()),
+    catalyst: Type.Optional(Type.String()),
+    timeframe: Type.Optional(Type.String()),
+    rationale: Type.Optional(Type.String()),
+    key_signals: Type.Optional(Type.Array(Type.String())),
+    risk_factors: Type.Optional(Type.Array(Type.String())),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const update: any = {};
+      if (params.state !== undefined) update.state = params.state;
+      if (params.confidence !== undefined) update.confidence = coerceNumber(params.confidence, 0.5);
+      if (params.thesis !== undefined) update.thesis = params.thesis;
+      if (params.catalyst !== undefined) update.catalyst = params.catalyst;
+      if (params.timeframe !== undefined) update.timeframe = params.timeframe;
+      if (params.rationale !== undefined) update.rationale = params.rationale;
+      if (params.key_signals !== undefined) update.key_signals = params.key_signals;
+      if (params.risk_factors !== undefined) update.risk_factors = params.risk_factors;
+      const result = requireStrategies().update(params.strategy_id, update);
+      if (!result) return text("Strategy not found: " + params.strategy_id);
+      return text("Updated: " + result.ticker + " -> " + result.state + " @" + (result.confidence * 100).toFixed(0) + "%");
+    } catch (e: any) { return text("Error: " + e.message); }
+  },
+});
+
+export const archiveStrategyTool = defineTool({
+  name: "archive_strategy", label: "Archive Strategy",
+  description: "Mark a strategy as stale (no new signals) or failed (thesis invalidated).",
+  parameters: Type.Object({
+    strategy_id: Type.String(),
+    reason: Type.String({ description: "stale or failed" }),
+    note: Type.Optional(Type.String()),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const result = requireStrategies().archive(params.strategy_id, params.reason, params.note);
+      if (!result) return text("Strategy not found: " + params.strategy_id);
+      return text("Archived: " + result.ticker + " -> " + result.state);
+    } catch (e: any) { return text("Error: " + e.message); }
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALL STRATEGIST TOOLS — export for registration
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const allStrategistTools = [
+  fetchMarketDataTool, fetchNewsTool, fetchAllNewsTool, fetchEdgarFilingsTool,
+  scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
+  scanRedditTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
+  searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool,
+  createStrategyTool, updateStrategyTool, archiveStrategyTool,
+];

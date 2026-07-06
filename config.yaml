@@ -61,8 +61,16 @@ data:
 # ─── LLM / Agent ─────────────────────────────────────────────
 agent:
   thinking_level: medium      # off, minimal, low, medium, high, xhigh
-  max_tool_calls_per_turn: 6   # Reduced from 12 — agent gets pre-digested context now, needs fewer calls
+  max_tool_calls_per_turn: 12   # Strategist needs: research + create_strategy + update_strategy per cycle
   enable_reflection: false       # Disabled — saves tokens. Manual reflect_on_performance still available
+
+# ─── Strategist ────────────────────────────────────────────
+strategist:
+  enabled: true               # Set false to disable the strategist process entirely
+  cycle_interval_ms: 720000     # Run strategist every ~12 min during market hours (every 6 trader cycles)
+  pre_market_window_min: 30    # Start strategist N minutes before market open
+  prune_stale_hours: 48        # Archive strategies with no updates in N hours
+  purge_retained_days: 14      # Permanently delete stale/failed strategies after N days
 
 # ─── Research Engine ──────────────────────────────────────────
 research:

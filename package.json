@@ -13,6 +13,7 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "latest",
     "@sinclair/typebox": "^0.32.0",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^16.4.0",
     "fast-xml-parser": "^4.5.0",
     "sql.js": "^1.14.1",
@@ -21,6 +22,7 @@
     "yaml": "^2.4.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/sql.js": "^1.4.11"
   }
 }

@@ -1,6 +1,6 @@
 /**
- * Pi.dev agent session factory.
- * Creates the trading brain with custom tools, system prompt, and OpenRouter model.
+ * Pi.dev agent session factory for the strategist.
+ * Research-only tools. No execution capabilities.
  */
 
 import {
@@ -12,20 +12,17 @@ import {
   type ResourceLoader,
   createExtensionRuntime,
 } from "@earendil-works/pi-coding-agent";
-import { TRADER_SYSTEM_PROMPT } from "./trader-prompt.js";
-import { allTradingTools } from "./tools.js";
+import { STRATEGIST_SYSTEM_PROMPT } from "./strategist-prompt.js";
+import { allStrategistTools } from "./strategist-tools.js";
 
-export async function createTradingBrain(openRouterKey?: string) {
-  // 1. Auth: OpenRouter
+export async function createStrategistBrain(openRouterKey?: string) {
   const authStorage = AuthStorage.create();
   if (openRouterKey) {
     authStorage.setRuntimeApiKey("openrouter", openRouterKey);
   }
 
-  // 2. Model Registry
   const modelRegistry = ModelRegistry.inMemory(authStorage);
 
-  // 3. Model Selection — try configured model, then fall through known-good models
   const knownModels = [
     process.env.OPENROUTER_MODEL,
     "google/gemini-2.5-flash-lite",
@@ -38,7 +35,7 @@ export async function createTradingBrain(openRouterKey?: string) {
   for (const mid of knownModels) {
     model = modelRegistry.find("openrouter", mid);
     if (model) {
-      console.log(`🧠 Using model: ${mid}`);
+      console.log(`🧠 Strategist using model: ${mid}`);
       break;
     }
   }
@@ -47,39 +44,35 @@ export async function createTradingBrain(openRouterKey?: string) {
     throw new Error(`No valid model found in OpenRouter registry. Tried: ${knownModels.join(", ")}`);
   }
 
-  // 4. Custom ResourceLoader (no discovery, fully explicit)
   const resourceLoader: ResourceLoader = {
     getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => TRADER_SYSTEM_PROMPT,
+    getSystemPrompt: () => STRATEGIST_SYSTEM_PROMPT,
     getAppendSystemPrompt: () => [],
     extendResources: () => {},
     reload: async () => {},
   };
 
-  // 5. Settings — aggressive compaction to control token costs
-  // Compaction keeps recent tokens (roughly ~12 turns worth) and discards old context
   const settingsManager = SettingsManager.inMemory({
     compaction: {
       enabled: true,
-      keepRecentTokens: 12000,  // Keep ~12K tokens of recent context (~12 turns)
-      reserveTokens: 4000,      // Reserve 4K tokens for the response
+      keepRecentTokens: 12000,
+      reserveTokens: 4000,
     },
-    retry: { enabled: false }, // Disable retries to prevent runaway costs on errors
+    retry: { enabled: false },
   });
 
-  // 6. Create Session
   const { session } = await createAgentSession({
     model: model ?? undefined,
     thinkingLevel: "low",
     authStorage,
     modelRegistry,
     resourceLoader,
-    tools: allTradingTools.map((t) => t.name),
-    customTools: allTradingTools,
+    tools: allStrategistTools.map((t) => t.name),
+    customTools: allStrategistTools,
     sessionManager: SessionManager.inMemory(),
     settingsManager,
   });

@@ -53,16 +53,26 @@ import {
   buildTickerContext,
 } from "../execution/alpaca.js";
 import { PortfolioState } from "../state/portfolio.js";
+import { StrategyStore } from "../state/strategies.js";
 import { evaluateBuySignal, getExitPlan, checkExitConditions } from "../risk/guardrails.js";
 
 // Global state reference — set at startup
 let _state: PortfolioState;
+let _strategies: StrategyStore | null = null;
 let _watchlist: string[] = [];
 let _discovered: string[] = [];
 
 export function setGlobalState(state: PortfolioState, watchlist: string[]) {
   _state = state;
   _watchlist = watchlist;
+}
+
+export function setStrategyStore(store: StrategyStore | null) {
+  _strategies = store;
+}
+
+function requireStrategies(): StrategyStore | null {
+  return _strategies;
 }
 
 export async function getWatchlist(): Promise<string[]> {
@@ -1770,20 +1780,76 @@ export const getMacroCalendarTool = defineTool({
 // ALL TOOLS EXPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STRATEGY-AWARE TOOLS (trader can read from strategist's output)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const getActiveStrategiesTool = defineTool({
+  name: "get_active_strategies",
+  label: "Get Active Strategies",
+  description: "Get the top 10 candidate strategies from the strategist AND any strategies linked to open positions. Read-only.",
+  parameters: Type.Object({}),
+  execute: async () => {
+    if (!_strategies) return { content: [{ type: "text", text: "Strategy store not available." }], details: {} };
+    const state = requireState();
+    const positions = state.getPositions();
+    const top = _strategies.getTopStrategies(10);
+    const lines = ["=== ACTIVE STRATEGIES ==="];
+    for (const pos of positions) {
+      const tickerStrategies = _strategies.getByTicker(pos.symbol, 3);
+      const linked = tickerStrategies.find((s: any) => s.state === "active" || s.state === "realized");
+      if (linked) {
+        lines.push("POSITION: " + pos.symbol + " -> " + linked.strategy_type + " " + linked.state + " @" + (linked.confidence * 100).toFixed(0) + "%");
+        lines.push("  Thesis: " + linked.thesis);
+        if (linked.catalyst) lines.push("  Catalyst: " + linked.catalyst);
+      }
+    }
+    if (top.length > 0) {
+      lines.push("TOP CANDIDATES:");
+      for (const s of top) {
+        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.direction + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
+        lines.push("    " + s.thesis.slice(0, 200));
+        if (s.catalyst) lines.push("    Cat: " + s.catalyst.slice(0, 100));
+      }
+    } else {
+      lines.push("No candidate strategies from the strategist.");
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }], details: {} };
+  },
+});
+
+export const updateStrategyOnExitTool = defineTool({
+  name: "update_strategy_on_exit",
+  label: "Update Strategy on Exit",
+  description: "After closing a position, call this to record the outcome on the linked strategy. Feeds back to the strategist's learning loop.",
+  parameters: Type.Object({
+    ticker: Type.String({ description: "Ticker symbol" }),
+    exit_price: Type.Optional(NumStr),
+    exit_reason: Type.Optional(Type.String()),
+    strategy_outcome: Type.Optional(Type.String({ description: "success or failure" })),
+  }),
+  execute: async (_id: string, params: any) => {
+    if (!_strategies) return { content: [{ type: "text", text: "Strategy store not available." }], details: {} };
+    const ticker = params.ticker.toUpperCase();
+    const tickerStrategies = _strategies.getByTicker(ticker, 5);
+    const active = tickerStrategies.find((s: any) => s.state === "active" || s.state === "realized");
+    if (!active) return { content: [{ type: "text", text: "No active strategy found for " + ticker + "." }], details: {} };
+    const outcome = (params.strategy_outcome as string) ?? "unknown";
+    const update: any = { state: outcome === "success" ? "active" : "failed", exit_reason: (params.exit_reason as string) ?? "closed" };
+    if (params.exit_price !== undefined) update.exit_price = coerceNumber(params.exit_price, 0);
+    _strategies.update(active.id, update);
+    return { content: [{ type: "text", text: "Strategy " + active.id.slice(0, 16) + " for " + ticker + ": " + outcome }], details: {} };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALL TRADING TOOLS — execution + strategy, no pure-research tools
+// ═══════════════════════════════════════════════════════════════════════════
+
 export const allTradingTools = [
-  // Data gathering
+  // Market context (keep minimal)
   fetchMarketDataTool,
   fetchNewsTool,
-  fetchAllNewsTool,
-  fetchEdgarFilingsTool,
-  scanRelativeVolumeTool,
-  scanPreMarketGapsTool,
-  scanRangeBreaksTool,
-  scanRedditTool,
-  discoverOpportunitiesTool,
-  // Sector/macro research
-  searchSectorSignalsTool,
-  getMacroCalendarTool,
   // Portfolio & execution
   checkPortfolioTool,
   monitorPositionsTool,
@@ -1798,13 +1864,14 @@ export const allTradingTools = [
   reflectOnPerformanceTool,
   emergencyCloseAllTool,
   findSimilarTradesTool,
-  // Context notes — agent-curated persistent awareness
+  // Context notes
   noteContextTool,
   viewContextTool,
   pruneContextTool,
-  // Research engine — persistent signal database
+  // Research engine (keep for quick checks)
   searchSignalsTool,
   describeDatasetsTool,
-  searchSectorSignalsTool,
-  getMacroCalendarTool,
+  // Strategy-aware tools
+  getActiveStrategiesTool,
+  updateStrategyOnExitTool,
 ];
