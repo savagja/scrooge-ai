@@ -526,6 +526,8 @@ async function buildPerceptionPrompt(
   lines.push("");
   lines.push("═══ DEEPER DIVE TOOLS ═══");
   lines.push("The context above is a snapshot. Use these tools to dive deeper on anything interesting:");
+  lines.push("  • search_signals — query the RESEARCH DB for signal history across sources (recommended first step)");
+  lines.push("  • describe_datasets — see what data is in the research DB (schemas, row counts, date ranges)");
   lines.push("  • fetch_news — full headlines for a specific ticker");
   lines.push("  • fetch_all_news — ALL recent headlines (wider net)");
   lines.push("  • fetch_edgar_filings — detailed SEC 8-K filings");
@@ -536,6 +538,7 @@ async function buildPerceptionPrompt(
   lines.push("  • discover_opportunities — find NEW tickers outside current list");
   lines.push("  • consult_memory — check accumulated lessons and similar past trades before deciding");
   lines.push("");
+  lines.push("💡 TIP: search_signals is faster than calling individual data sources. The research DB already has Yahoo movers, Reddit, EDGAR filings, volume spikes, gaps, and range breaks — all accumulated 24/7.");
   lines.push("⚠️  IMPORTANT: The market is CURRENTLY OPEN. Alpaca clock confirms this.");
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
   lines.push("    If you see a timestamp that looks late, ignore it — the event loop handles clock checks.");

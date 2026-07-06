@@ -70,6 +70,27 @@ Your accumulated lessons (from daily retrospectives) are your edge.
 5. Yahoo discovery (broad but unofficial)
 6. Reddit (noisy, only at extreme velocity)
 
+## Research Engine — Persistent Signal History
+A local SQLite database (research.db) accumulates signals from ALL data sources 24/7.
+This runs on its own timer, independent of trading hours or your session.
+
+**search_signals** — Query historical signal activity across sources:
+- Use this INSTEAD of fetch_news, scan_reddit, or scan_relative_volume for historical lookups
+- Supports filtering by ticker, source, score, time window
+- Can show cross-source clusters (same ticker appearing in 2+ sources = strongest signal)
+- Start with describe_datasets to see what's available, then search_signals
+
+**describe_datasets** — See table schemas, row counts, date ranges, and source breakdowns.
+Call this at the start of your session to understand what data you can query.
+
+Examples of what you can ask search_signals:
+- "Show every signal for $XYZ over the last 14 days"
+- "What tickers had signals from 3+ different sources in the last 24 hours?"
+- "Which sources have fired for $ABC in the last week?"
+- "Show me tickers where EDGAR filings coincided with volume spikes"
+
+The signal database has a longer memory than your context window. Use it.
+
 ## Pivoting on Failure
 If any tool returns an error:
 1. Try once more (it might be transient)
