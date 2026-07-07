@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
-import type { Strategy, StrategyType, StrategyState } from "../types.js";
+import type { Strategy, StrategyType, StrategyState, WhatIfEntry, WhatIfGrade } from "../types.js";
 
 const DATA_DIR = join(process.cwd(), "data");
 
@@ -135,6 +135,19 @@ export class StrategyStore {
     }
     this.db.prepare(
       "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (4, ?)"
+    ).run(new Date().toISOString());
+    version = { version: 4 };
+
+    if (version.version >= 5) return;
+
+    // V5: Add what_if column — stores retrospective analysis as JSON
+    try {
+      this.db.exec("ALTER TABLE strategies ADD COLUMN what_if TEXT");
+    } catch {
+      // Column already exists
+    }
+    this.db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (5, ?)"
     ).run(new Date().toISOString());
   }
 
@@ -397,6 +410,7 @@ export class StrategyStore {
       rationale: (row.rationale as string) ?? "",
       key_signals: this._parseJsonArray(row.key_signals as string),
       risk_factors: this._parseJsonArray(row.risk_factors as string),
+      what_if: this._parseWhatIf(row.what_if as string | null | undefined),
       entry_conditions: (row.entry_conditions as string) ?? null,
       exit_conditions: (row.exit_conditions as string) ?? null,
       created_at: row.created_at as string,
@@ -420,5 +434,63 @@ export class StrategyStore {
     } catch {
       return [];
     }
+  }
+
+  private _parseWhatIf(val: string | null | undefined): WhatIfEntry | null {
+    if (!val) return null;
+    try {
+      return JSON.parse(val) as WhatIfEntry;
+    } catch {
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // WHAT-IF ANALYSIS — Strategy grading
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Update a strategy's what-if analysis entry (grades, hypotheticals). */
+  updateWhatIf(id: string, whatIf: WhatIfEntry): Strategy | null {
+    this.db.prepare(
+      "UPDATE strategies SET what_if = ?, updated_at = ? WHERE id = ?"
+    ).run(JSON.stringify(whatIf), new Date().toISOString(), id);
+    return this.getById(id);
+  }
+
+  /** Get all strategies that were active/updated on a given date (for what-if analysis). */
+  getStrategiesForDay(date: string): Strategy[] {
+    // Strategies created, updated, or last_signal_at on this date, OR that were active
+    const startOfDay = `${date}T00:00:00.000Z`;
+    const endOfDay = `${date}T23:59:59.999Z`;
+    const rows = this.db.prepare(`
+      SELECT * FROM strategies
+      WHERE (created_at BETWEEN ? AND ?)
+         OR (updated_at BETWEEN ? AND ?)
+         OR (last_signal_at IS NOT NULL AND last_signal_at BETWEEN ? AND ?)
+      ORDER BY updated_at DESC
+    `).all(startOfDay, endOfDay, startOfDay, endOfDay, startOfDay, endOfDay) as Record<string, unknown>[];
+    return rows.map((r) => this._rowToStrategy(r));
+  }
+
+  /** Get all strategies that were never what-if analyzed. */
+  getUnanalyzedStrategies(limit: number = 100): Strategy[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM strategies
+      WHERE what_if IS NULL
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(limit) as Record<string, unknown>[];
+    return rows.map((r) => this._rowToStrategy(r));
+  }
+
+  /** Get all strategies that have been what-if analyzed, newest first. */
+  getAnalyzedStrategies(limit: number = 100): Strategy[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM strategies
+      WHERE what_if IS NOT NULL
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(limit) as Record<string, unknown>[];
+    return rows.map((r) => this._rowToStrategy(r));
   }
 }

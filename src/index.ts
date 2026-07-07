@@ -522,6 +522,12 @@ async function buildPerceptionPrompt(
           if (linkedStrategy.exit_conditions) contextLines.push(`  exit if: ${linkedStrategy.exit_conditions.slice(0, 150)}`);
           if (linkedStrategy.risk_factors && linkedStrategy.risk_factors.length > 0)
             contextLines.push(`  risk factors: ${linkedStrategy.risk_factors.slice(0, 3).join(", ")}`);
+          // What-If grade (if available) — shows historical setup quality
+          if (linkedStrategy.what_if) {
+            const wi = linkedStrategy.what_if;
+            const gradeEmoji = wi.grade >= 4 ? "✅" : wi.grade <= 2 ? "❌" : "➖";
+            contextLines.push(`  HISTORICAL GRADE: ${gradeEmoji} ${wi.grade}/5 | ${wi.abstraction} | ${wi.gradeRationale.slice(0, 120)}`);
+          }
         }
         return contextLines;
       });
@@ -560,7 +566,22 @@ async function buildPerceptionPrompt(
 
   if (topStrategies.length > 0) {
     lines.push("");
-    lines.push("═══ CANDIDATE STRATEGIES (with real-time price context) ═══");
+    lines.push("═══ CANDIDATE STRATEGIES (with what-if historical grades + real-time price context) ═══");
+
+    // Quick what-if summary at the top (scannable overview)
+    const graded = topStrategies.filter(s => s.what_if !== null);
+    if (graded.length > 0) {
+      const highGrade = graded.filter(s => s.what_if!.grade >= 4);
+      const lowGrade = graded.filter(s => s.what_if!.grade <= 2);
+      const parts: string[] = [];
+      if (highGrade.length > 0) parts.push(`✅ ${highGrade.length} historically high-grade (4-5)`);
+      if (lowGrade.length > 0) parts.push(`❌ ${lowGrade.length} historically low-grade (1-2)`);
+      const neutral = graded.length - highGrade.length - lowGrade.length;
+      if (neutral > 0) parts.push(`➖ ${neutral} neutral (3)`);
+      const ungraded = topStrategies.length - graded.length;
+      if (ungraded > 0) parts.push(`🆕 ${ungraded} ungraded`);
+      lines.push(`  📊 What-If summary: ${parts.join(" | ")}`);
+    }
 
     for (const s of topStrategies) {
       // Fetch compact ticker context (no RISK/THESIS sections since there's no position)
@@ -571,7 +592,19 @@ async function buildPerceptionPrompt(
         priceLines = [`  (Price data unavailable for ${s.ticker})`];
       }
 
-      // Output: separator → strategy header → strategy metadata → remaining price context
+      // ── WHAT-IF GRADE (if available) ─────────────────────────────────
+      let whatIfLine = "";
+      if (s.what_if) {
+        const gradeEmoji = s.what_if.grade >= 4 ? "✅" : s.what_if.grade <= 2 ? "❌" : "➖";
+        const pnlStr = s.what_if.potentialGainLoss >= 0
+          ? `+$${s.what_if.potentialGainLoss.toFixed(2)}`
+          : `-$${Math.abs(s.what_if.potentialGainLoss).toFixed(2)}`;
+        whatIfLine = `  HISTORICAL: ${gradeEmoji} Grade ${s.what_if.grade}/5 | ${pnlStr} (${s.what_if.potentialGainLossPct >= 0 ? "+" : ""}${s.what_if.potentialGainLossPct.toFixed(1)}%) | Pattern: ${s.what_if.abstraction}`;
+      } else {
+        whatIfLine = `  HISTORICAL: No prior grade — new/unanalyzed strategy`;
+      }
+
+      // Output: separator → strategy header → strategy metadata → what-if → remaining price context
       lines.push("");
       lines.push(priceLines[0]); // ═══ separator line
       lines.push(`CANDIDATE: [${s.ticker}] ${s.direction.toUpperCase()} ${s.strategy_type} | ${s.state} | conviction: ${s.conviction} @ ${(s.confidence * 100).toFixed(0)}%`);
@@ -581,6 +614,7 @@ async function buildPerceptionPrompt(
       if (s.entry_conditions) lines.push(`  entry: ${s.entry_conditions.slice(0, 200)}`);
       if (s.exit_conditions) lines.push(`  exit if: ${s.exit_conditions.slice(0, 200)}`);
       if (s.rationale) lines.push(`  rationale: ${s.rationale.slice(0, 200)}`);
+      lines.push(whatIfLine);
       // Append remaining price action lines (skip the original "TICKER:" header)
       lines.push(...priceLines.slice(2));
     }
@@ -614,11 +648,16 @@ async function buildPerceptionPrompt(
   lines.push("2. Review the TOP CANDIDATE STRATEGIES above — these are pre-vetted by the strategist.");
   lines.push("3. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
   lines.push("4. For mechanical exits: monitor_positions → place_sell_order → update_strategy_on_exit.");
-  lines.push("5. **BEFORE any trade**, call consult_memory to check lessons and similar trades.");
-  lines.push("6. If a candidate strategy has a strong thesis + confirming price action → place_buy_order or place_short_order.");
-  lines.push("7. If nothing passes your bar → hold_cash (explain why).");
-  lines.push("8. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
-  lines.push("9. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
+  lines.push("5. **BEFORE any trade**, call consult_memory to check lessons and similar past trades.");
+  lines.push("6. Each candidate strategy now includes a HISTORICAL GRADE (1-5) + hypothetical P&L from prior days.");
+  lines.push("   - Grade 4-5 = setup has worked before in similar conditions. Stronger conviction.");
+  lines.push("   - Grade 1-2 = setup has failed before. Approach with caution or skip.");
+  lines.push("   - Grade 3 or 'No prior grade' = neutral or new. Rely on thesis + price action.");
+  lines.push("   - Use the ABSTRACTION PATTERN to assess regime fit: `momentum long trending_up works catalyst:news`.");
+  lines.push("7. If a candidate strategy has a strong thesis + confirming price action + good historical grade → place_buy_order or place_short_order.");
+  lines.push("8. If nothing passes your bar → hold_cash (explain why).");
+  lines.push("9. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
+  lines.push("10. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
 
   return lines.join("\n");
 }

@@ -213,6 +213,76 @@ export interface StrategyTool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WHAT-IF ANALYSIS — Retrospective strategy grading & hypothetical outcomes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Grade assigned to a strategy based on retrospective analysis.
+ * 1 = terrible setup (wrong direction, wrong thesis, bad timing)
+ * 2 = poor (some promise but fundamentally flawed execution/thesis)
+ * 3 = neutral (could go either way, no clear edge or flaw)
+ * 4 = good (solid thesis, reasonable timing, would take again)
+ * 5 = excellent (perfect setup, clear catalyst, well-timed)
+ */
+export type WhatIfGrade = 1 | 2 | 3 | 4 | 5;
+
+/**
+ * Per-strategy what-if entry stored in the strategy record.
+ * Populated during the daily retrospective.
+ */
+export interface WhatIfEntry {
+  grade: WhatIfGrade;
+  gradeRationale: string;
+  /** Hypothetical P&L if a position had been opened and held for a reasonable duration */
+  potentialGainLoss: number;
+  potentialGainLossPct: number;
+  /** The price at which we'd have hypothetically entered */
+  hypotheticalEntryPrice: number;
+  /** The price at which we'd have hypothetically exited */
+  hypotheticalExitPrice: number;
+  /** A one-sentence abstracted version of this setup for lesson learning */
+  abstraction: string;
+  /** The regime and VIX snapshot at the time the strategy was active */
+  regime: string;
+  vix: number | null;
+  /** Timestamp when this analysis was generated */
+  analyzedAt: string;
+}
+
+/**
+ * Aggregate what-if analysis for an entire day's retro.
+ */
+export interface WhatIfAnalysis {
+  date: string;
+  totalStrategiesAnalyzed: number;
+  gradeDistribution: Record<string, number>;  // "1" -> count, "2" -> count, etc.
+  totalHypotheticalPnL: number;
+  bestStrategy: {
+    ticker: string;
+    grade: WhatIfGrade;
+    potentialGainLoss: number;
+    abstraction: string;
+  } | null;
+  worstStrategy: {
+    ticker: string;
+    grade: WhatIfGrade;
+    potentialGainLoss: number;
+    abstraction: string;
+  } | null;
+  strategies: Array<{
+    ticker: string;
+    strategy_type: string;
+    direction: string;
+    state: string;
+    grade: WhatIfGrade;
+    potentialGainLoss: number;
+    potentialGainLossPct: number;
+    abstraction: string;
+    gradeRationale: string;
+  }>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PERSISTED STATE (what goes into state.json)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -243,7 +313,8 @@ export type ActivityEventType =
   | "briefing"
   | "retrospective"
   | "system"
-  | "decision";
+  | "decision"
+  | "what_if";
 
 export interface ActivityEvent {
   id: string;
@@ -280,6 +351,8 @@ export interface DailyReport {
   whatToChange: string;
   /** Complete markdown report */
   markdown: string;
+  /** What-If strategy analysis results */
+  whatIfAnalysis?: WhatIfAnalysis;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -342,6 +415,9 @@ export interface Strategy {
   pnl: number | null;
   pnl_pct: number | null;
   exit_reason: string | null;
+
+  // What-If analysis — populated during retrospective
+  what_if: WhatIfEntry | null;
 
   // Source attribution
   created_by: "strategist" | "manual";

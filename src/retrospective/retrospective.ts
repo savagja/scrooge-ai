@@ -12,10 +12,12 @@
  */
 
 import { PortfolioState } from "../state/portfolio.js";
+import { StrategyStore } from "../state/strategies.js";
 import type { DailyReport, Lesson, StrategyCalibration } from "../types.js";
 import { analyzeDay } from "./analyzer.js";
 import { getTradingDate } from "../config.js";
 import { integrateLessons } from "./lesson-integrator.js";
+import { runWhatIfAnalysis, formatAbstractionsForPrompt, formatWhatIfForLessons, formatWhatIfForReport } from "./what-if.js";
 
 /**
  * Check whether the retrospective should run for today.
@@ -33,7 +35,7 @@ export async function shouldRunRetrospective(state: PortfolioState): Promise<boo
  * Call this at market close (or after the last cycle of the day).
  * Returns the completed DailyReport and persists it to state.json.
  */
-export async function runDailyRetrospective(state: PortfolioState): Promise<DailyReport> {
+export async function runDailyRetrospective(state: PortfolioState, strategyStore?: StrategyStore): Promise<DailyReport> {
   const today = getTradingDate();
   console.log(`📋 Running daily retrospective for ${today}...`);
 
@@ -63,6 +65,22 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
   const grossPnL = trades.reduce((s, t) => s + t.pnl, 0);
   const netPnL = grossPnL - (tokenCost?.totalCost ?? 0);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // WHAT-IF STRATEGY ANALYSIS — Grade all strategies from today
+  // ═══════════════════════════════════════════════════════════════════════
+  let whatIfData: Awaited<ReturnType<typeof runWhatIfAnalysis>> | null = null;
+  if (strategyStore || process.env.STRATEGIES_DB_PATH) {
+    const store = strategyStore ?? new StrategyStore(process.env.STRATEGIES_DB_PATH);
+    try {
+      whatIfData = await runWhatIfAnalysis(today, store, state);
+    } catch (e: any) {
+      console.warn(`⚠️  What-If analysis failed: ${e.message}`);
+    }
+  }
+
+  const whatIfSummary = whatIfData ? formatAbstractionsForPrompt(whatIfData) : "";
+  const whatIfReportSection = whatIfData ? formatWhatIfForReport(whatIfData) : "";
+
   // Build comprehensive data bundle for the LLM
   const dataBundle = buildDataBundle(
     today,
@@ -84,6 +102,9 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
   // Have the LLM write the analysis
   const analysis = await analyzeDay(dataBundle);
 
+  // Append what-if-specific analysis to the LLM-produced sections
+  // (the what-if data was also included in the data bundle for LLM consumption)
+
   // Build the full markdown report
   const markdown = buildMarkdownReport({
     date: today,
@@ -103,6 +124,7 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
     whatWorked: analysis.whatWorked,
     whatDidnt: analysis.whatDidnt,
     whatToChange: analysis.whatToChange,
+    whatIfSection: whatIfReportSection,
   });
 
   const report: DailyReport = {
@@ -125,21 +147,25 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
     whatDidnt: analysis.whatDidnt,
     whatToChange: analysis.whatToChange,
     markdown,
+    whatIfAnalysis: whatIfData ?? undefined,
   };
 
   // Persist the report
   state.saveDailyReport(report);
 
   // ── EVOLVE LESSONS via the lesson integrator ──────────────────────────
-  // This is a SEPARATE LLM call that takes the retrospective findings
-  // together with existing lessons and returns an evolved set (merge,
-  // modify, overwrite, remove — NOT just additive).
+  // The lesson integrator now receives what-if abstractions as additional
+  // structured context about which strategy patterns worked and which didn't.
   console.log(`🧠 Running lesson integrator...`);
   const calibrationSummary = calibrationTable.length > 0
     ? calibrationTable.map((c) =>
         `- ${c.strategy} in ${c.regime}: ${(c.winRate * 100).toFixed(0)}% WR (${c.totalTrades} trades)`
       ).join("\n")
     : "No calibration data yet.";
+
+  const whatIfLessonsContext = whatIfData
+    ? `\n\n### What-If Strategy Analysis (for lesson evolution)\n\n${formatWhatIfForLessons(whatIfData)}`
+    : "";
 
   const existingLessons = state.getMemory().lessons;
   const evolvedLessons = await integrateLessons({
@@ -153,13 +179,16 @@ export async function runDailyRetrospective(state: PortfolioState): Promise<Dail
       equityChange: totalEquityChange,
       consecutiveLosses: trades.slice(-5).filter((t) => t.pnl <= 0).length,
     },
-    calibrationSummary,
+    calibrationSummary: calibrationSummary + whatIfLessonsContext,
   });
 
   state.replaceAllLessons(evolvedLessons);
 
   console.log(`✅ Daily retrospective saved for ${today}`);
   console.log(`   Trades: ${trades.length} | Net P&L: $${netPnL.toFixed(2)} | Win Rate: ${winRate.toFixed(1)}%`);
+  if (whatIfData) {
+    console.log(`   What-If: ${whatIfData.totalStrategiesAnalyzed} strategies graded, $${whatIfData.totalHypotheticalPnL.toFixed(2)} hypothetical P&L`);
+  }
   console.log(`   Lessons: ${evolvedLessons.length} total (${evolvedLessons.filter((l) => !l.deprecated).length} active)`);
 
   return report;
@@ -305,6 +334,7 @@ function buildMarkdownReport(report: {
   whatWorked: string;
   whatDidnt: string;
   whatToChange: string;
+  whatIfSection?: string;
 }): string {
   const changeEmoji = report.netPnL >= 0 ? "🟢" : "🔴";
   const winRateEmoji = report.winRate >= 50 ? "✅" : "⚠️";
@@ -340,6 +370,8 @@ function buildMarkdownReport(report: {
     `## What to Do Differently`,
     ``,
     report.whatToChange,
+    ``,
+    report.whatIfSection || "",
     ``,
     `---`,
     ``,
