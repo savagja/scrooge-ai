@@ -515,9 +515,11 @@ async function buildPerceptionPrompt(
         // Append linked strategy data to each position's context block
         if (linkedStrategy) {
           contextLines.push("─ LINKED STRATEGY ─");
-          contextLines.push(`  type: ${linkedStrategy.strategy_type} | state: ${linkedStrategy.state} | confidence: ${(linkedStrategy.confidence * 100).toFixed(0)}%`);
+          contextLines.push(`  type: ${linkedStrategy.strategy_type} | state: ${linkedStrategy.state} | conviction: ${linkedStrategy.conviction} | confidence: ${(linkedStrategy.confidence * 100).toFixed(0)}%`);
           contextLines.push(`  thesis: ${linkedStrategy.thesis.slice(0, 200)}`);
           if (linkedStrategy.catalyst) contextLines.push(`  catalyst: ${linkedStrategy.catalyst.slice(0, 120)}`);
+          if (linkedStrategy.entry_conditions) contextLines.push(`  entry: ${linkedStrategy.entry_conditions.slice(0, 150)}`);
+          if (linkedStrategy.exit_conditions) contextLines.push(`  exit if: ${linkedStrategy.exit_conditions.slice(0, 150)}`);
           if (linkedStrategy.risk_factors && linkedStrategy.risk_factors.length > 0)
             contextLines.push(`  risk factors: ${linkedStrategy.risk_factors.slice(0, 3).join(", ")}`);
         }
@@ -572,10 +574,12 @@ async function buildPerceptionPrompt(
       // Output: separator → strategy header → strategy metadata → remaining price context
       lines.push("");
       lines.push(priceLines[0]); // ═══ separator line
-      lines.push(`CANDIDATE: [${s.ticker}] ${s.direction.toUpperCase()} ${s.strategy_type} | ${s.state} @ ${(s.confidence * 100).toFixed(0)}% confidence`);
+      lines.push(`CANDIDATE: [${s.ticker}] ${s.direction.toUpperCase()} ${s.strategy_type} | ${s.state} | conviction: ${s.conviction} @ ${(s.confidence * 100).toFixed(0)}%`);
       lines.push(`  thesis: ${s.thesis.slice(0, 200)}`);
       if (s.catalyst) lines.push(`  catalyst: ${s.catalyst.slice(0, 120)}`);
       if (s.timeframe) lines.push(`  timeframe: ${s.timeframe}`);
+      if (s.entry_conditions) lines.push(`  entry: ${s.entry_conditions.slice(0, 200)}`);
+      if (s.exit_conditions) lines.push(`  exit if: ${s.exit_conditions.slice(0, 200)}`);
       if (s.rationale) lines.push(`  rationale: ${s.rationale.slice(0, 200)}`);
       // Append remaining price action lines (skip the original "TICKER:" header)
       lines.push(...priceLines.slice(2));

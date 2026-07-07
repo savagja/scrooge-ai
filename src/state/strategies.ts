@@ -41,6 +41,7 @@ export class StrategyStore {
         timeframe       TEXT,
 
         confidence      REAL NOT NULL DEFAULT 0.0,
+        conviction      TEXT NOT NULL DEFAULT 'low',
 
         rationale       TEXT NOT NULL DEFAULT '',
         key_signals     TEXT NOT NULL DEFAULT '[]',
@@ -58,7 +59,9 @@ export class StrategyStore {
         pnl_pct         REAL,
         exit_reason     TEXT,
 
-        created_by      TEXT NOT NULL DEFAULT 'strategist'
+        entry_conditions TEXT NOT NULL DEFAULT '',
+        exit_conditions  TEXT NOT NULL DEFAULT '',
+        created_by       TEXT NOT NULL DEFAULT 'strategist'
       );
 
       CREATE INDEX IF NOT EXISTS idx_strategies_state      ON strategies(state);
@@ -87,20 +90,51 @@ export class StrategyStore {
 
   /** Migrate from pre-lifecycle format if needed */
   private _migrateFromV1() {
-    const version = this.db.prepare(
+    let version = this.db.prepare(
       "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
     ).get() as { version: number } | undefined;
 
-    if (version && version.version >= 2) return;
+    if (!version || version.version < 2) {
+      // V2: Add direction column if missing (older schemas may not have it)
+      try {
+        this.db.exec("ALTER TABLE strategies ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'");
+      } catch {
+        // Column already exists
+      }
+      this.db.prepare(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (2, ?)"
+      ).run(new Date().toISOString());
+      version = { version: 2 };
+    }
 
-    // V2: Add direction column if missing (older schemas may not have it)
+    if (version.version >= 3) return;
+
+    // V3: Add entry_conditions and exit_conditions columns
     try {
-      this.db.exec("ALTER TABLE strategies ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'");
+      this.db.exec("ALTER TABLE strategies ADD COLUMN entry_conditions TEXT NOT NULL DEFAULT ''");
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.exec("ALTER TABLE strategies ADD COLUMN exit_conditions TEXT NOT NULL DEFAULT ''");
     } catch {
       // Column already exists
     }
     this.db.prepare(
-      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (2, ?)"
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (3, ?)"
+    ).run(new Date().toISOString());
+    version = { version: 3 };
+
+    if (version.version >= 4) return;
+
+    // V4: Add conviction column
+    try {
+      this.db.exec("ALTER TABLE strategies ADD COLUMN conviction TEXT NOT NULL DEFAULT 'low'");
+    } catch {
+      // Column already exists
+    }
+    this.db.prepare(
+      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (4, ?)"
     ).run(new Date().toISOString());
   }
 
@@ -124,6 +158,9 @@ export class StrategyStore {
     rationale?: string;
     key_signals?: string[];
     risk_factors?: string[];
+    conviction?: string;
+    entry_conditions?: string | null;
+    exit_conditions?: string | null;
     created_by?: "strategist" | "manual";
     state?: StrategyState;
   }): Strategy {
@@ -135,11 +172,12 @@ export class StrategyStore {
       INSERT INTO strategies (
         id, ticker, strategy_type, direction, state,
         thesis, catalyst, timeframe,
-        confidence, rationale,
+        confidence, conviction, rationale,
         key_signals, risk_factors,
+        entry_conditions, exit_conditions,
         created_at, updated_at,
         created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -152,9 +190,12 @@ export class StrategyStore {
       params.catalyst ?? null,
       params.timeframe ?? null,
       params.confidence ?? 0.1,
+      params.conviction ?? "low",
       params.rationale ?? "",
       JSON.stringify(params.key_signals ?? []),
       JSON.stringify(params.risk_factors ?? []),
+      params.entry_conditions ?? "",
+      params.exit_conditions ?? "",
       now,
       now,
       params.created_by ?? "strategist",
@@ -173,12 +214,15 @@ export class StrategyStore {
   update(id: string, params: Partial<{
     state: StrategyState;
     confidence: number;
+    conviction?: string;
     thesis: string;
     catalyst: string | null;
     timeframe: string | null;
     rationale: string;
     key_signals: string[];
     risk_factors: string[];
+    entry_conditions?: string | null;
+    exit_conditions?: string | null;
     position_id: string | null;
     entry_price: number | null;
     exit_price: number | null;
@@ -192,8 +236,9 @@ export class StrategyStore {
     const vals: unknown[] = [now];
 
     const fields: (keyof typeof params)[] = [
-      "state", "confidence", "thesis", "catalyst", "timeframe",
+      "state", "confidence", "conviction", "thesis", "catalyst", "timeframe",
       "rationale", "key_signals", "risk_factors",
+      "entry_conditions", "exit_conditions",
       "position_id", "entry_price", "exit_price", "pnl", "pnl_pct",
       "exit_reason", "last_signal_at",
     ];
@@ -249,6 +294,11 @@ export class StrategyStore {
         CASE state
           WHEN 'developing' THEN 2
           WHEN 'anticipated' THEN 1
+        END DESC,
+        CASE conviction
+          WHEN 'high' THEN 3
+          WHEN 'medium' THEN 2
+          WHEN 'low' THEN 1
         END DESC,
         confidence DESC,
         updated_at DESC
@@ -343,9 +393,12 @@ export class StrategyStore {
       catalyst: (row.catalyst as string) ?? null,
       timeframe: (row.timeframe as string) ?? null,
       confidence: row.confidence as number,
+      conviction: (row.conviction as string) ?? "low",
       rationale: (row.rationale as string) ?? "",
       key_signals: this._parseJsonArray(row.key_signals as string),
       risk_factors: this._parseJsonArray(row.risk_factors as string),
+      entry_conditions: (row.entry_conditions as string) ?? null,
+      exit_conditions: (row.exit_conditions as string) ?? null,
       created_at: row.created_at as string,
       updated_at: row.updated_at as string,
       last_signal_at: (row.last_signal_at as string) ?? null,

@@ -1799,17 +1799,21 @@ export const getActiveStrategiesTool = defineTool({
       const tickerStrategies = _strategies.getByTicker(pos.symbol, 3);
       const linked = tickerStrategies.find((s: any) => s.state === "active" || s.state === "realized");
       if (linked) {
-        lines.push("POSITION: " + pos.symbol + " -> " + linked.strategy_type + " " + linked.state + " @" + (linked.confidence * 100).toFixed(0) + "%");
+        lines.push("POSITION: " + pos.symbol + " -> " + linked.strategy_type + " " + linked.state + " | conviction: " + linked.conviction + " @" + (linked.confidence * 100).toFixed(0) + "%");
         lines.push("  Thesis: " + linked.thesis);
         if (linked.catalyst) lines.push("  Catalyst: " + linked.catalyst);
+        if (linked.entry_conditions) lines.push("  Entry: " + linked.entry_conditions);
+        if (linked.exit_conditions) lines.push("  Exit if: " + linked.exit_conditions);
       }
     }
     if (top.length > 0) {
       lines.push("TOP CANDIDATES:");
       for (const s of top) {
-        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.direction + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%");
+        lines.push("  " + s.ticker + " [" + s.strategy_type + "] " + s.direction + " " + s.state + " | conviction: " + s.conviction + " @" + (s.confidence * 100).toFixed(0) + "%");
         lines.push("    " + s.thesis.slice(0, 200));
-        if (s.catalyst) lines.push("    Cat: " + s.catalyst.slice(0, 100));
+        if (s.catalyst) lines.push("    Catalyst: " + s.catalyst.slice(0, 100));
+        if (s.entry_conditions) lines.push("    Entry: " + s.entry_conditions.slice(0, 150));
+        if (s.exit_conditions) lines.push("    Exit if: " + s.exit_conditions.slice(0, 150));
       }
     } else {
       lines.push("No candidate strategies from the strategist.");

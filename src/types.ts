@@ -315,7 +315,13 @@ export interface Strategy {
   timeframe: string | null; // 'intraday', '1-3_days', '1-2_weeks', 'multi_week'
 
   // Confidence
-  confidence: number;       // 0.0 to 1.0
+  confidence: number;       // 0.0 to 1.0 — numeric ranking. Starts rough, improves via calibration
+  conviction: string;       // 'low' | 'medium' | 'high' — human tier used until calibration data accumulates
+
+  // When to enter — explicit conditions the trader should see
+  entry_conditions: string | null;  // "wait for RSI < 30 and volume > 2x avg"
+  // When to exit — beyond stop losses, strategic exit triggers
+  exit_conditions: string | null;   // "exit if catalyst fires but price doesn't move in 2h"
 
   // Reasoning trail
   rationale: string;

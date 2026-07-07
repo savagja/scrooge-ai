@@ -150,6 +150,9 @@ export const createStrategyTool = defineTool({
     rationale: Type.Optional(Type.String()),
     key_signals: Type.Optional(Type.Array(Type.String())),
     risk_factors: Type.Optional(Type.Array(Type.String())),
+    conviction: Type.Optional(Type.String()),
+    entry_conditions: Type.Optional(Type.String()),
+    exit_conditions: Type.Optional(Type.String()),
     state: Type.Optional(Type.String()),
   }),
   execute: async (_id: string, params: any) => {
@@ -165,6 +168,9 @@ export const createStrategyTool = defineTool({
         rationale: params.rationale ?? "",
         key_signals: params.key_signals ?? [],
         risk_factors: params.risk_factors ?? [],
+        conviction: params.conviction ?? "low",
+        entry_conditions: params.entry_conditions ?? null,
+        exit_conditions: params.exit_conditions ?? null,
         state: params.state ?? "anticipated",
       });
       return text("Created: " + s.id.slice(0, 16) + " (" + s.ticker + " " + s.strategy_type + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%)");
@@ -185,18 +191,24 @@ export const updateStrategyTool = defineTool({
     rationale: Type.Optional(Type.String()),
     key_signals: Type.Optional(Type.Array(Type.String())),
     risk_factors: Type.Optional(Type.Array(Type.String())),
+    conviction: Type.Optional(Type.String()),
+    entry_conditions: Type.Optional(Type.String()),
+    exit_conditions: Type.Optional(Type.String()),
   }),
   execute: async (_id: string, params: any) => {
     try {
       const update: any = {};
       if (params.state !== undefined) update.state = params.state;
       if (params.confidence !== undefined) update.confidence = coerceNumber(params.confidence, 0.5);
+      if (params.conviction !== undefined) update.conviction = params.conviction;
       if (params.thesis !== undefined) update.thesis = params.thesis;
       if (params.catalyst !== undefined) update.catalyst = params.catalyst;
       if (params.timeframe !== undefined) update.timeframe = params.timeframe;
       if (params.rationale !== undefined) update.rationale = params.rationale;
       if (params.key_signals !== undefined) update.key_signals = params.key_signals;
       if (params.risk_factors !== undefined) update.risk_factors = params.risk_factors;
+      if (params.entry_conditions !== undefined) update.entry_conditions = params.entry_conditions;
+      if (params.exit_conditions !== undefined) update.exit_conditions = params.exit_conditions;
       const result = requireStrategies().update(params.strategy_id, update);
       if (!result) return text("Strategy not found: " + params.strategy_id);
       return text("Updated: " + result.ticker + " -> " + result.state + " @" + (result.confidence * 100).toFixed(0) + "%");

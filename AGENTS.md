@@ -402,8 +402,8 @@ CREATE TABLE strategies (
   timeframe       TEXT,            -- 'intraday', '1-3_days', '1-2_weeks', 'multi_week'
 
   -- Confidence
-  confidence      REAL NOT NULL,  -- 0.0 to 1.0
-  conviction      TEXT,            -- 'low', 'medium', 'high' (derived from confidence + signal strength)
+  confidence      REAL NOT NULL,  -- 0.0 to 1.0 — rough numeric sort hint
+  conviction      TEXT NOT NULL DEFAULT 'low',  -- 'low', 'medium', 'high' (primary tier the trader reads)
 
   -- Reasoning trail
   rationale       TEXT NOT NULL,   -- Why this strategy exists
