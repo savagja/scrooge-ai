@@ -160,6 +160,9 @@ Respond ONLY with valid JSON:
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
 
+    // DEBUG: log first 500 chars
+    console.log("[RETRO] Raw LLM response (first 1KB):", content.slice(0, 1024));
+
     const parsed = extractJson<RetrospectiveAnalysis>(content);
 
     if (!parsed) {

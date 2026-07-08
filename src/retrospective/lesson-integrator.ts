@@ -157,6 +157,9 @@ IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
 
+    // DEBUG: log first 500 chars
+    console.log("[LESSON-INTEGRATOR] Raw LLM response (first 1KB):", content.slice(0, 1024));
+
     const parsed = extractJson<IntegratorOutput>(content);
 
     if (!parsed || !Array.isArray(parsed.lessons) || parsed.lessons.length === 0) {
