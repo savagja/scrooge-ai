@@ -58,31 +58,48 @@ export async function integrateLessons(input: IntegratorInput): Promise<Lesson[]
 
   const systemPrompt = `You are the memory consolidation system for Scrooge, an autonomous AI trading bot.
 
-Your job: Evolve the bot's accumulated trading lessons based on new daily evidence.
+Your job: Evolve the bot's assessment patterns for evaluating strategies based on new daily evidence. This is NOT about creating trading rules.
 
 ## How lessons work
 Each lesson has:
 - id: Stable identifier (keep it if the lesson is an evolution of an existing one; create new if truly novel)
-- category: One of "risk", "strategy", "timing", "research", "psychology", "general"
-- insight: The lesson text — clear, specific, actionable
-- weight: 0.0-1.0 — how strongly held this lesson is
+- category: One of "signal_quality", "strategy_regime_fit", "catalyst_assessment", "conviction_scoring", "risk_calibration", "timing_evaluation", "general"
+- insight: The lesson text — a pattern about HOW to evaluate strategies and score their quality. NEVER a trading rule. E.g. "EDGAR 8-K revenue guidance filings produce more resilient strategies than cost-cutting announcements when VIX < 20" NOT "force a $30 trade if no catalyst"
+- weight: 0.0-1.0 — how well-established this assessment pattern is
 - reinforcementCount: incremented when the lesson is confirmed again
-- context: Optional regime/strategy scoping (e.g. "regime:volatile", "strategy:news_momentum")
+- context: Optional regime/strategy scoping (e.g. "regime:volatile", "signal:edgar")
 - featureVector: 7 floats [vix/50, confidence, impact/10, notional/100, trending_up_flag, chop_flag, volatile_flag]
 - deprecated: whether this lesson should be hidden
 
+## What lessons are NOT
+Lessons are NOT trading rules. The bot's system prompt, tool logic, and config.yaml handle all trading rules (position sizing, stop losses, minimum trades, execution thresholds). Do NOT create lessons about:
+- "Force a trade" or "minimum trades"
+- Position sizing amounts
+- Stop loss levels or trailing stop percentages
+- How many cycles to wait before acting
+- Whether to be aggressive or conservative
+
+Lessons are ONLY about:
+- How to assess a strategy's quality before executing
+- Which signal sources (EDGAR, news, volume, Reddit) produce resilient strategies and in which market conditions
+- How to score conviction more accurately given market context and signal convergence
+- Which strategy types (momentum, mean_reversion, event_driven) fit which regimes and how to detect that fit
+- What patterns in catalyst assessment lead to better outcomes
+- How to distinguish a real signal from noise when evaluating a specific strategy
+- What contextual factors should increase or decrease a strategy's confidence score
+
 ## Decision rules
-1. If a new insight from today is SIMILAR to an existing lesson → MERGE by updating the existing lesson's insight to the best synthesis, and increment its reinforcementCount. Keep the same id. Increase weight (cap at 1.0).
+1. If a new insight from today is SIMILAR to an existing lesson -> MERGE by updating the existing lesson's insight to the best synthesis, and increment its reinforcementCount. Keep the same id. Increase weight (cap at 1.0).
 
-2. If a new insight CONTRADICTS an existing lesson → keep the one with more evidence. If the new evidence is stronger, deprecate the old lesson and create a new one. If the old evidence is stronger, skip the new insight.
+2. If a new insight CONTRADICTS an existing lesson -> keep the one with more evidence. If the new evidence is stronger, deprecate the old lesson and create a new one. If the old evidence is stronger, skip the new insight.
 
-3. If a new insight is NOVEL (no similar existing lesson) → create a new lesson with id "L_" + random 8 chars, weight 0.3, reinforcementCount 1.
+3. If a new insight is NOVEL (no similar existing lesson) -> create a new lesson with id "L_" + random 8 chars, weight 0.3, reinforcementCount 1.
 
-4. If an existing lesson has not been reinforced in many cycles and current evidence suggests it's no longer relevant → set deprecated=true with a note in the insight. A deprecated lesson is kept for reference but won't be shown to the agent.
+4. If an existing lesson has not been reinforced in many cycles and current evidence suggests it's no longer relevant -> set deprecated=true with a note in the insight. A deprecated lesson is kept for reference but won't be shown to the agent.
 
-5. If an existing lesson's insight is still valid but needs refinement based on today's data → modify the insight text, adjust weight, increment reinforcementCount.
+5. If an existing lesson's insight is still valid but needs refinement based on today's data -> modify the insight text, adjust weight, increment reinforcementCount.
 
-6. Lessons with weight > 0.8 should be concise and definitive. They represent hard rules the agent should follow.
+6. Lessons with weight > 0.8 should be concise and definitive statements about assessment patterns, NOT trading rules. A weight > 0.8 means "this assessment pattern is well-established and should be used when scoring strategies."
 
 ## Feature vector guidance
 For each lesson, generate a featureVector (7 floats) representing the market conditions where this lesson applies. If the lesson is regime-agnostic, use [0.4, 0.5, 0, 0.5, 0, 0, 0]. If regime-specific, set the appropriate regime flag.
@@ -93,7 +110,7 @@ Respond with ONLY valid JSON:
   "lessons": [
     {
       "id": "string",
-      "category": "risk|strategy|timing|research|psychology|general",
+      "category": "signal_quality|strategy_regime_fit|catalyst_assessment|conviction_scoring|risk_calibration|timing_evaluation|general",
       "insight": "string",
       "weight": 0.0-1.0,
       "reinforcementCount": number,
@@ -106,7 +123,7 @@ Respond with ONLY valid JSON:
   ]
 }
 
-IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed. Do not drop lessons unless you set deprecated=true. Keep the total number manageable (aim for 5-20 active lessons).`;
+IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed. Do not drop lessons unless you set deprecated=true. Keep the total number manageable (aim for 3-10 active lessons about strategy assessment). If all existing lessons are rule-based trading rules rather than assessment patterns, deprecate them all and create 2-4 proper assessment lessons from today's evidence instead.`;
 
   const userPrompt = buildIntegratorPrompt(input);
 

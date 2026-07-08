@@ -67,7 +67,7 @@ Respond ONLY with valid JSON:
 {
   "whatWorked": "Markdown prose (2-4 paragraphs) about strategy-trade alignment, good selections, what-if successes",
   "whatDidnt": "Markdown prose (2-4 paragraphs) about misalignment, ignored strategies, regime misfit, what-if failures",
-  "whatToChange": "Markdown prose with 2-4 specific, actionable changes"
+  "whatToChange": "Markdown prose with 2-4 specific improvements to HOW strategies are assessed. Focus on: how to evaluate strategy quality better, which signal patterns should increase/decrease conviction scores, how to detect regime-strategy fit earlier, what contextual factors are being missed when scoring strategies. Also analyze the what-if results: were there high-grade strategies (G4-5) the trader missed? What made those strategies good in hindsight but the trader didn't see it? Were there low-grade strategies (G1-2) the trader wasted time on? What signal should have flagged those as poor earlier? Use these patterns to improve strategy assessment. Do NOT suggest trading rules (position sizing, stop levels, min trades, forced execution)."
 }`;
 
   const userPrompt = buildAnalysisPrompt(data);
