@@ -87,6 +87,7 @@ export class PortfolioState {
     if (!this.state.dailyReports) this.state.dailyReports = [];
     if (!this.state.activityStream) this.state.activityStream = [];
     if (!this.state.tokenCosts) this.state.tokenCosts = [];
+    if (this.state.settledCash === null || this.state.settledCash === undefined) this.state.settledCash = this.state.cash;
     if (this.state.sessionInputTokens === undefined) this.state.sessionInputTokens = 0;
     if (this.state.sessionOutputTokens === undefined) this.state.sessionOutputTokens = 0;
     if (this.state.sessionInputCost === undefined) this.state.sessionInputCost = 0;
@@ -95,6 +96,10 @@ export class PortfolioState {
     if (this.state.memory?.lessons) {
       this.state.memory.lessons = this.state.memory.lessons
         .filter((l) => typeof l === 'object' && l !== null) as Lesson[];
+    }
+    // Backwards compat: ensure contextNotes exists in memory
+    if (!this.state.memory.contextNotes) {
+      this.state.memory.contextNotes = [];
     }
     // Backwards compat: add direction and lowestPrice to existing positions
     for (const pos of this.state.positions) {

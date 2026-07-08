@@ -89,66 +89,62 @@ export class StrategyStore {
   }
 
   /** Migrate from pre-lifecycle format if needed */
-  private _migrateFromV1() {
-    let version = this.db.prepare(
-      "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
-    ).get() as { version: number } | undefined;
-
-    if (!version || version.version < 2) {
-      // V2: Add direction column if missing (older schemas may not have it)
-      try {
-        this.db.exec("ALTER TABLE strategies ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'");
-      } catch {
-        // Column already exists
-      }
+  private _migrateFromV1(): void {
+    const currentVersion = (
       this.db.prepare(
-        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (2, ?)"
-      ).run(new Date().toISOString());
-      version = { version: 2 };
+        "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+      ).get() as { version: number } | undefined
+    )?.version ?? 0;
+
+    const migrations: Array<{ version: number; label: string; run: () => void }> = [
+      {
+        version: 2,
+        label: "Add direction column",
+        run: () => {
+          try { this.db.exec("ALTER TABLE strategies ADD COLUMN direction TEXT NOT NULL DEFAULT 'long'"); }
+          catch { /* column already exists */ }
+        },
+      },
+      {
+        version: 3,
+        label: "Add entry_conditions and exit_conditions columns",
+        run: () => {
+          try { this.db.exec("ALTER TABLE strategies ADD COLUMN entry_conditions TEXT NOT NULL DEFAULT ''"); }
+          catch { /* column already exists */ }
+          try { this.db.exec("ALTER TABLE strategies ADD COLUMN exit_conditions TEXT NOT NULL DEFAULT ''"); }
+          catch { /* column already exists */ }
+        },
+      },
+      {
+        version: 4,
+        label: "Add conviction column",
+        run: () => {
+          try { this.db.exec("ALTER TABLE strategies ADD COLUMN conviction TEXT NOT NULL DEFAULT 'low'"); }
+          catch { /* column already exists */ }
+        },
+      },
+      {
+        version: 5,
+        label: "Add what_if column",
+        run: () => {
+          try { this.db.exec("ALTER TABLE strategies ADD COLUMN what_if TEXT"); }
+          catch { /* column already exists */ }
+        },
+      },
+    ];
+
+    for (const m of migrations) {
+      if (currentVersion >= m.version) continue;
+      try {
+        console.log(`[STRATEGIES] Migration V${m.version}: ${m.label}`);
+        m.run();
+        this.db.prepare(
+          "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)"
+        ).run(m.version, new Date().toISOString());
+      } catch (e: any) {
+        console.warn(`[STRATEGIES] Migration V${m.version} failed: ${e.message}`);
+      }
     }
-
-    if (version.version >= 3) return;
-
-    // V3: Add entry_conditions and exit_conditions columns
-    try {
-      this.db.exec("ALTER TABLE strategies ADD COLUMN entry_conditions TEXT NOT NULL DEFAULT ''");
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.db.exec("ALTER TABLE strategies ADD COLUMN exit_conditions TEXT NOT NULL DEFAULT ''");
-    } catch {
-      // Column already exists
-    }
-    this.db.prepare(
-      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (3, ?)"
-    ).run(new Date().toISOString());
-    version = { version: 3 };
-
-    if (version.version >= 4) return;
-
-    // V4: Add conviction column
-    try {
-      this.db.exec("ALTER TABLE strategies ADD COLUMN conviction TEXT NOT NULL DEFAULT 'low'");
-    } catch {
-      // Column already exists
-    }
-    this.db.prepare(
-      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (4, ?)"
-    ).run(new Date().toISOString());
-    version = { version: 4 };
-
-    if (version.version >= 5) return;
-
-    // V5: Add what_if column — stores retrospective analysis as JSON
-    try {
-      this.db.exec("ALTER TABLE strategies ADD COLUMN what_if TEXT");
-    } catch {
-      // Column already exists
-    }
-    this.db.prepare(
-      "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (5, ?)"
-    ).run(new Date().toISOString());
   }
 
   close() {

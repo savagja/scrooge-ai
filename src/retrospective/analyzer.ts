@@ -1,13 +1,9 @@
 /**
  * LLM-powered analysis for the daily retrospective.
  *
- * Sends the day's raw trade data, equity curve, lessons, and calibration table
- * to OpenRouter and asks it to produce the three prose sections:
- *   - What Worked Well
- *   - What Didn't Work Well
- *   - What to Do Differently
- *
- * All analysis is anchored to the goal: **grow the account fast**.
+ * Strategy-aware: Evaluates the TRADER's execution against the STRATEGIST's
+ * hypotheses, not just raw P&L. The what-if data and strategy lifecycle
+ * states are central to the analysis.
  */
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
@@ -18,9 +14,10 @@ interface RetrospectiveAnalysis {
   whatToChange: string;
 }
 
-/**
- * Analyze a full day of trading data and produce structured retrospective prose.
- */
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════
+
 export async function analyzeDay(
   data: RetrospectiveDataBundle
 ): Promise<RetrospectiveAnalysis> {
@@ -32,26 +29,45 @@ export async function analyzeDay(
 
   const model = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite";
 
-  const systemPrompt = `You are the performance analyst for Scrooge, an autonomous AI trading bot. Your job is to tell the truth about how it performed — no sugar-coating, no excuses.
+  const systemPrompt = `You are the performance analyst for Scrooge, an autonomous AI trading bot with a two-agent architecture:
 
-You evaluate based on what the bot's LLM ACTUALLY did, not just the P&L numbers. A flat day with zero trades where the bot spent all day analyzing and never pulling the trigger IS a failure. A losing trade where the bot correctly identified a catalyst but got stopped out on normal volatility IS NOT a failure — it's process working correctly.
+  - **Strategist**: Forms hypotheses (strategies with lifecycle states). Does NOT trade.
+  - **Trader**: Executes strategies. Reads top 10 non-position strategies and decides entry/exit.
 
-Key questions you always ask:
-1. **Did the LLM execute or just analyze?** If the bot spent multiple cycles scanning, looking at the same data, and never committing, that's analysis paralysis. Call it out.
-2. **Was the thesis right even if the trade lost?** A correct catalyst thesis that got stopped out on a normal retracement is GOOD process. A trade that went against the market regime is BAD process regardless of P&L.
-3. **Did infrastructure failures stall the bot?** If an API error caused the LLM to spin its wheels retrying or pivoting poorly, flag it. The bot needs fallback plays.
-4. **Was cash deployed with intent?** Cash is not inherently bad. Buying SPY just to be invested is dumb. Was the cash held for a specific reason (waiting for a setup) or was it idle because the bot froze?
-5. **Did the bot learn from failures or repeat them?** Same mistake two days in a row? That's a memory/lesson problem.
-6. **Regime match**: Was the strategy appropriate for the market conditions? Mean reversion in a strong trend is wrong. Trend-following in chop is wrong.
-7. **Opportunity cost**: What did the bot NOT do that it should have? Especially when a clear catalyst thesis existed.
+Your job is to evaluate the TRADER's performance against the STRATEGIST's hypotheses.
 
-Be direct. Use specific examples from the data. No corporate speak. No fluff. If the bot did nothing useful, say it.
+## Core Evaluation Framework
 
-Respond ONLY with valid JSON in this exact format:
+### 1. Strategy-Trade Alignment
+For each trade, was there a strategy behind it? If a trade happened without a linked strategy, that's a RED FLAG — the trader acted without research backing.
+
+### 2. What-If Opportunity Cost
+The what-if analysis grades every active strategy on a 1-5 scale with hypothetical P&L. 
+- Did the trader take G4-5 (good/excellent) strategies? Great.
+- Did the trader ignore G4-5 while taking G1-2? Bad.
+- Did the trader enter G1-2 strategies? That means poor strategy selection.
+
+### 3. Regime x Strategy Fit
+- momentum in trending_up: fits | momentum in chop: misfit
+- mean_reversion in chop: fits | mean_reversion in trending_up: misfit
+- event_driven in volatile: fits | event_driven in trending_up: neutral
+- swing in trending_up: fits | swing in volatile: misfit
+
+### 4. Strategy Lifecycle
+- Did the trader enter at the right lifecycle stage (developing or realized)?
+- Were strategies archived correctly (failed/stale)?
+
+### 5. Recurring Patterns
+What patterns emerge from the what-if analysis? Look for repeated abstractions that worked or failed.
+
+## Output Format
+Be direct. Use specific examples. No corporate speak.
+
+Respond ONLY with valid JSON:
 {
-  "whatWorked": "Markdown prose (2-4 paragraphs describing what actually went right — process, not just P&L",
-  "whatDidnt": "Markdown prose (2-4 paragraphs describing what went wrong and WHY — be specific about LLM behavior, not just outcomes",
-  "whatToChange": "Markdown prose with 2-4 specific, actionable changes. Include implementation approach (hard-code rule, prompt change, lesson update, tool change)"
+  "whatWorked": "Markdown prose (2-4 paragraphs) about strategy-trade alignment, good selections, what-if successes",
+  "whatDidnt": "Markdown prose (2-4 paragraphs) about misalignment, ignored strategies, regime misfit, what-if failures",
+  "whatToChange": "Markdown prose with 2-4 specific, actionable changes"
 }`;
 
   const userPrompt = buildAnalysisPrompt(data);
@@ -85,7 +101,6 @@ Respond ONLY with valid JSON in this exact format:
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
 
-    // Extract JSON from potential markdown fences
     let cleaned = content.replace(/```json\s*|```\s*/g, "").trim();
     const match = cleaned.match(/\{[\s\S]*\}/);
     if (match) cleaned = match[0];
@@ -103,14 +118,17 @@ Respond ONLY with valid JSON in this exact format:
   }
 }
 
-// ─── Prompt Builder ────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA BUNDLE
+// ═══════════════════════════════════════════════════════════════════════════
 
-interface RetrospectiveDataBundle {
+export interface RetrospectiveDataBundle {
   date: string;
   tradeCount: number;
   trades: Array<{
     symbol: string;
     strategy: string;
+    direction: string;
     pnl: number;
     pnlPct: number;
     entryPrice: number;
@@ -144,11 +162,32 @@ interface RetrospectiveDataBundle {
   equityCurve: string;
   marketRegimes: string[];
   contextNotes: string[];
+  // Strategy-aware fields
+  whatIfSummary: string;
+  activeStrategyCount: number;
+  topStrategies: Array<{ ticker: string; type: string; direction: string; grade: number; pnl: string }>;
+  bottomStrategies: Array<{ ticker: string; type: string; direction: string; grade: number; pnl: string }>;
+  strategyStateCounts: Record<string, number>;
+  executedStrategies: Array<{
+    ticker: string;
+    type: string;
+    direction: string;
+    state: string;
+    confidence: number;
+    catalyst: string;
+    pnl: number | null;
+    pnlPct: number | null;
+    exit_reason: string | null;
+  }>;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROMPT BUILDER
+// ═══════════════════════════════════════════════════════════════════════════
 
 function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
   const lines: string[] = [
-    `## Daily Retrospective Data — ${data.date}`,
+    `## Daily Retrospective Data - ${data.date}`,
     ``,
     `### Overview`,
     `- Trades executed: ${data.tradeCount}`,
@@ -161,20 +200,35 @@ function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
     `- Ending Equity: $${data.endingEquity.toFixed(2)}`,
     `- Total Equity Change: $${data.totalEquityChange.toFixed(2)}`,
     `- Market Regimes Seen: ${data.marketRegimes.join(", ") || "unknown"}`,
+    `- Active Strategies Today: ${data.activeStrategyCount}`,
+    `- Strategy Lifecycle: A:${data.strategyStateCounts.anticipated ?? 0} D:${data.strategyStateCounts.developing ?? 0} R:${data.strategyStateCounts.realized ?? 0} F:${data.strategyStateCounts.failed ?? 0} S:${data.strategyStateCounts.stale ?? 0}`,
     ``,
     `### Equity Curve (sampled)`,
     data.equityCurve || "No snapshots available",
     ``,
   ];
 
-  // Individual trades
-  if (data.trades.length > 0) {
-    lines.push(`### Trades`);
-    for (const t of data.trades) {
-      const emoji = t.pnl >= 0 ? "✅" : "❌";
+  // Executed Strategies
+  if (data.executedStrategies.length > 0) {
+    lines.push(`### Executed Strategies (Linked to Positions)`);
+    for (const s of data.executedStrategies) {
+      const pnlStr = s.pnl !== null ? `$${s.pnl.toFixed(2)} (${(s.pnlPct ?? 0).toFixed(2)}%)` : "-";
       lines.push(
-        `${emoji} [${t.symbol}] ${t.strategy} | P&L: $${t.pnl.toFixed(2)} (${t.pnlPct.toFixed(2)}%) | ` +
-        `Entry: $${t.entryPrice.toFixed(2)} → Exit: $${t.exitPrice.toFixed(2)} | ` +
+        `- [${s.ticker}] ${s.type} ${s.direction} | State: ${s.state} | Conf: ${(s.confidence * 100).toFixed(0)}% | ` +
+        `Catalyst: ${s.catalyst ?? "none"} | P&L: ${pnlStr} | Exit: ${s.exit_reason ?? "open"}`
+      );
+    }
+    lines.push(``);
+  }
+
+  // Trades
+  if (data.trades.length > 0) {
+    lines.push(`### Trades Executed`);
+    for (const t of data.trades) {
+      const emoji = t.pnl >= 0 ? "+" : "-";
+      lines.push(
+        `${emoji} [${t.symbol}] ${t.strategy} (${t.direction}) | P&L: $${t.pnl.toFixed(2)} (${t.pnlPct.toFixed(2)}%) | ` +
+        `Entry: $${t.entryPrice.toFixed(2)} -> Exit: $${t.exitPrice.toFixed(2)} | ` +
         `Held: ${t.holdMinutes}min | Exit: ${t.exitReason} | ` +
         `Signal: ${t.signalSource} (conf: ${(t.signalConfidence * 100).toFixed(0)}%, impact: ${t.signalImpactScore}/10)`
       );
@@ -185,7 +239,32 @@ function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
     lines.push(``);
   }
 
-  // Context notes (what the agent was tracking)
+  // What-If Analysis
+  if (data.whatIfSummary) {
+    lines.push(`### What-If Strategy Analysis (Graded Strategies)`);
+    lines.push(data.whatIfSummary);
+    lines.push(``);
+  }
+
+  // Top Strategies
+  if (data.topStrategies.length > 0) {
+    lines.push(`### Top-Grade Strategies (G4-5) - Trader Should Have Considered`);
+    for (const s of data.topStrategies) {
+      lines.push(`- [${s.ticker}] ${s.type} ${s.direction} | G${s.grade}/5 | Hypo P&L: ${s.pnl}`);
+    }
+    lines.push(``);
+  }
+
+  // Bottom Strategies
+  if (data.bottomStrategies.length > 0) {
+    lines.push(`### Low-Grade Strategies (G1-2) - Trader Should Have Avoided`);
+    for (const s of data.bottomStrategies) {
+      lines.push(`- [${s.ticker}] ${s.type} ${s.direction} | G${s.grade}/5 | Hypo P&L: ${s.pnl}`);
+    }
+    lines.push(``);
+  }
+
+  // Context Notes
   if (data.contextNotes.length > 0) {
     lines.push(`### Context Notes (What the Agent Was Tracking)`);
     for (const n of data.contextNotes) {
@@ -194,7 +273,7 @@ function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
     lines.push(``);
   }
 
-  // Lessons already stored
+  // Lessons
   if (data.lessons.length > 0) {
     lines.push(`### Previously Stored Lessons`);
     for (const l of data.lessons.slice(-10)) {
@@ -203,9 +282,9 @@ function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
     lines.push(``);
   }
 
-  // Strategy calibration
+  // Calibration
   if (data.calibrationTable.length > 0) {
-    lines.push(`### Strategy × Regime Calibration (Historical)`);
+    lines.push(`### Strategy x Regime Calibration (Historical)`);
     for (const c of data.calibrationTable) {
       lines.push(
         `- ${c.strategy} in ${c.regime}: ${(c.winRate * 100).toFixed(0)}% WR (${c.totalTrades} trades, ` +
@@ -218,15 +297,24 @@ function buildAnalysisPrompt(data: RetrospectiveDataBundle): string {
   lines.push(
     `---`,
     ``,
-    `Now analyze this day with the goal of growing the account fast. Be direct and critical.`,
-    `Consider: risk level, research scope, assumptions, trend-chasing, long-term vs short-term plays,`,
-    `timing of entries/exits, conviction, missed opportunities, and whether cash was deployed enough.`,
+    `Now analyze with a STRATEGY-AWARE lens:`,
+    `1. Did the trader execute the right strategies from the strategist's slate?`,
+    `2. Were there highly-graded strategies (G4-5) the trader ignored?`,
+    `3. Did the trader enter low-graded strategies (G1-2) that should have been avoided?`,
+    `4. Was the strategy lifecycle managed correctly?`,
+    `5. What patterns in the what-if analysis suggest systematic biases?`,
+    `6. Was the strategy type appropriate for market regime?`,
+    `7. Did trader entry/exit align with strategy thesis?`,
+    ``,
+    `Be direct and critical. Use specific examples.`,
   );
 
   return lines.join("\n");
 }
 
-// ─── Fallback generators (when LLM is unavailable) ──────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// FALLBACK ANALYSIS
+// ═══════════════════════════════════════════════════════════════════════════
 
 function fallbackAnalysis(data: RetrospectiveDataBundle): RetrospectiveAnalysis {
   return {
@@ -239,28 +327,54 @@ function fallbackAnalysis(data: RetrospectiveDataBundle): RetrospectiveAnalysis 
 function fallbackWhatWorked(data: RetrospectiveDataBundle): string {
   const parts: string[] = [];
 
-  if (data.winRate > 60) {
-    parts.push(`**Win rate was strong at ${data.winRate.toFixed(0)}%** — the agent showed good discretion on which setups to take.`);
-  }
-  if (data.grossPnL > 0) {
-    parts.push(`**The day finished positive with a gross P&L of $${data.grossPnL.toFixed(2)}**, meaning overall the agent's directional bets were correct more often than not.`);
-  }
-  if (data.tradeCount > 0) {
-    const winners = data.trades.filter((t) => t.pnl > 0);
+  if (data.executedStrategies.length > 0) {
+    const winners = data.executedStrategies.filter((s) => s.pnl !== null && s.pnl > 0);
     if (winners.length > 0) {
-      const bestTrade = winners.reduce((a, b) => (a.pnl > b.pnl ? a : b));
-      parts.push(`**Best trade: ${bestTrade.symbol}** ($${bestTrade.pnl.toFixed(2)}, +${bestTrade.pnlPct.toFixed(2)}%) using ${bestTrade.strategy} strategy — this represents the type of setup the agent should look for more of.`);
+      parts.push(
+        `**${winners.length} executed strategies were profitable.** ` +
+        winners.map((s) => `${s.ticker} (${s.type} ${s.direction}, +${(s.pnlPct ?? 0).toFixed(1)}%)`).join(", ") +
+        `. These represent strategy-trade alignment that worked.`
+      );
     }
   }
-  if (data.lessons.length > 0) {
-    parts.push(`The agent had **${data.lessons.length} stored lessons** from prior reflection cycles that informed today's decisions.`);
+
+  if (data.topStrategies.length > 0) {
+    parts.push(
+      `**${data.topStrategies.length} strategies graded G4-5** (good/excellent) were identified by the what-if analysis. ` +
+      `These represent setups with solid thesis, clear catalysts, and good regime fit. ` +
+      `Patterns: ${data.topStrategies.map((s) => `${s.ticker} (${s.type} ${s.direction})`).join(", ")}.`
+    );
   }
-  if (data.tokenCost < 0.01) {
-    parts.push(`**Token costs were low** ($${data.tokenCost.toFixed(5)}) — the agent operated efficiently without excessive LLM overhead.`);
+
+  if (data.activeStrategyCount > 0) {
+    parts.push(
+      `**${data.activeStrategyCount} strategies were active** during the day across lifecycle states. ` +
+      `The strategist generated hypotheses for the trader to evaluate.`
+    );
+  }
+
+  if (data.winRate > 60 && data.tradeCount >= 3) {
+    parts.push(
+      `**Win rate was strong at ${data.winRate.toFixed(0)}%** - the trader showed good discretion ` +
+      `on which strategies to execute.`
+    );
+  }
+
+  if (data.grossPnL > 0) {
+    parts.push(
+      `**The day finished positive with a gross P&L of $${data.grossPnL.toFixed(2)}** - ` +
+      `the trader's directional bets aligned with strategy theses.`
+    );
   }
 
   if (parts.length === 0) {
-    parts.push(`No trades were executed today. The agent held cash, which is a valid decision if no clear edge was identified. However, cash doesn't compound — the bar for taking a trade should be low enough to deploy capital regularly.`);
+    parts.push(
+      `No trades were executed today. The trader held cash, which is valid if the strategist's ` +
+      `top strategies didn't align with market conditions. However, ` +
+      (data.activeStrategyCount > 0
+        ? `${data.activeStrategyCount} strategies existed - the trader should explain why none were actionable.`
+        : `no strategies were active - the strategist needs to generate more hypotheses.`)
+    );
   }
 
   return parts.join("\n\n");
@@ -269,38 +383,41 @@ function fallbackWhatWorked(data: RetrospectiveDataBundle): string {
 function fallbackWhatDidnt(data: RetrospectiveDataBundle): string {
   const parts: string[] = [];
 
-  if (data.tradeCount === 0) {
-    parts.push(`**Zero trades executed today.** While discretion is good, the agent needs to find more opportunities. Cash doesn't compound. The agent should be asking: did I look hard enough? Did I check all data sources? Did I miss obvious setups?`);
-  }
-
-  if (data.winRate < 50 && data.tradeCount >= 3) {
-    parts.push(`**Win rate was ${data.winRate.toFixed(0)}%** — the agent lost more trades than it won. This suggests either poor signal selection, wrong regime fit, or bad timing.`);
-  }
-
-  if (data.netPnL < 0) {
-    parts.push(`**Net P&L was negative at $${data.netPnL.toFixed(2)}** — the combination of trade losses and token costs resulted in account drawdown. Every losing day needs root-cause analysis.`);
-  }
-
-  const losers = data.trades.filter((t) => t.pnl < 0);
-  const bigLosers = losers.filter((t) => t.pnl <= -5);
-  if (bigLosers.length > 0) {
-    for (const l of bigLosers.slice(0, 3)) {
-      parts.push(`**Big loss on ${l.symbol}**: -$${Math.abs(l.pnl).toFixed(2)} (${l.pnlPct.toFixed(2)}%). ${l.exitReason !== "stop_loss" ? "This loss was NOT a stop-loss exit — the stop may have been too loose or absent." : "The stop-loss did its job and cut the loss."}`);
+  if (data.bottomStrategies.length > 0 && data.executedStrategies.length > 0) {
+    const badEntries = data.executedStrategies.filter((s) =>
+      data.bottomStrategies.some((b) => b.ticker === s.ticker && b.type === s.type)
+    );
+    if (badEntries.length > 0) {
+      parts.push(
+        `**${badEntries.length} executed strategies received poor what-if grades (G1-2).** ` +
+        `The trader entered strategies that the retrospective analysis rated as poor setups. ` +
+        `These include: ${badEntries.map((s) => `${s.ticker} (${s.type} ${s.direction})`).join(", ")}.`
+      );
     }
   }
 
-  if (data.totalEquityChange < 0) {
-    parts.push(`**Account equity declined by $${Math.abs(data.totalEquityChange).toFixed(2)} today.** The primary goal is to grow the account fast, so a red day is a failure toward that objective.`);
+  if (data.topStrategies.length > 0 && data.tradeCount > 0) {
+    parts.push(
+      `**${data.topStrategies.length} high-grade strategies existed** that the trader DID NOT execute. ` +
+      `These represent missed opportunities: ${data.topStrategies.map((s) => `${s.ticker} (G${s.grade})`).join(", ")}. ` +
+      `The trader should explain why these were skipped.`
+    );
   }
 
-  // Check if winners were cut too early
-  const winnersCutEarly = data.trades.filter((t) => t.pnl > 0 && t.pnlPct < 1.0 && t.wasPromoted === false);
-  if (winnersCutEarly.length > 0) {
-    parts.push(`**${winnersCutEarly.length} winning trade(s) were closed before hitting the green threshold** (+1%). These were small winners that could have become larger if given more room. The agent may be exiting too early.`);
+  if (data.tradeCount === 0) {
+    parts.push(`**Zero trades executed today.** The trader needs to find more opportunities by reviewing the strategist's hypotheses more carefully.`);
+  }
+
+  if (data.winRate < 50 && data.tradeCount >= 3) {
+    parts.push(`**Win rate was ${data.winRate.toFixed(0)}%** - the trader lost more trades than won. This suggests poor strategy selection, wrong regime fit, or bad timing.`);
+  }
+
+  if (data.netPnL < 0) {
+    parts.push(`**Net P&L was negative at $${data.netPnL.toFixed(2)}** - the combination of trade losses and token costs resulted in account drawdown.`);
   }
 
   if (parts.length === 0) {
-    parts.push(`No major issues identified from the raw data. The LLM analysis would provide deeper insight into qualitative factors like market context fit, research thoroughness, and conviction levels.`);
+    parts.push(`No major issues identified from the raw data. The LLM analysis would provide deeper insight into strategy-trade alignment and what-if opportunity costs.`);
   }
 
   return parts.join("\n\n");
@@ -309,37 +426,42 @@ function fallbackWhatDidnt(data: RetrospectiveDataBundle): string {
 function fallbackWhatToChange(data: RetrospectiveDataBundle): string {
   const recommendations: string[] = [];
 
-  if (data.tradeCount === 0) {
-    recommendations.push("**Trade more aggressively.** Set a minimum of 1-2 trades per day. Review all data sources (news, EDGAR, volume, gaps, Yahoo movers) before concluding there's nothing to trade.");
-    recommendations.push("**Lower the bar for entry.** If no trade meets the confidence + impact threshold, consider reducing position size rather than skipping entirely. Small, frequent bets compound.");
+  if (data.tradeCount === 0 && data.activeStrategyCount > 0) {
+    recommendations.push("**Execute more.** The strategist generated hypotheses but the trader didn't act. Review why the top strategies weren't actionable.");
+  } else if (data.tradeCount === 0) {
+    recommendations.push("**Strategist needs more output.** No strategies were active. The strategist should cast a wider net.");
+  }
+
+  if (data.bottomStrategies.length > 0 && data.executedStrategies.length > 0) {
+    const overlaps = data.executedStrategies.filter(s =>
+      data.bottomStrategies.some(b => b.ticker === s.ticker && b.type === s.type)
+    );
+    if (overlaps.length > 0) {
+      recommendations.push("**Avoid low-grade strategies.** The trader entered strategies that the what-if analysis graded poorly. Use the what-if grades from past retrospectives to filter out G1-2 strategies before entry.");
+    }
+  }
+
+  if (data.topStrategies.length > 0 && data.executedStrategies.length > 0) {
+    const missedOpportunities = data.topStrategies.filter(t =>
+      !data.executedStrategies.some(e => e.ticker === t.ticker && e.type === t.type)
+    );
+    if (missedOpportunities.length > 0) {
+      recommendations.push("**Take more high-grade opportunities.** The trader ignored G4-5 strategies. Lower the bar for entry when the what-if pattern is proven (same strategy type + regime that has historically graded well).");
+    }
   }
 
   if (data.winRate < 50 && data.tradeCount >= 3) {
-    recommendations.push("**Improve signal quality.** A win rate below 50% means either the strategies don't fit the current regime or the execution is poor. Check if today's regime matched the strategies used.");
+    recommendations.push("**Improve signal selection.** A win rate below 50% means poor strategy-regime fit. Check if the strategies being executed match the current regime. Use the calibration table as a filter.");
   }
 
-  if (data.netPnL < 0 && data.tokenCost > 0.02) {
-    recommendations.push("**Reduce token costs.** The LLM cost ($${data.tokenCost.toFixed(3)}) exceeded the value generated. Use cheaper models for preliminary screening and only use expensive models for high-conviction setups.");
-  }
-
-  // Check if mostly one strategy was used
   const strategies = new Set(data.trades.map((t) => t.strategy));
   if (strategies.size <= 1 && data.tradeCount >= 3) {
-    recommendations.push("**Diversify strategies.** All today's trades used only one approach. Different regimes reward different strategies. Use the full toolkit: news momentum, mean reversion, EDGAR catalysts, volume breakouts.");
-  }
-
-  const hasHeldPositions = data.trades.some((t) => t.holdMinutes > 60);
-  if (!hasHeldPositions && data.tradeCount > 0) {
-    recommendations.push("**Let winners run.** All trades were short-duration (under 1 hour). Consider holding strong positions longer to capture larger moves. The trailing stop mechanism is designed for this.");
-  }
-
-  if (data.totalEquityChange > 0 && data.tradeCount < 3) {
-    recommendations.push("**Scale up.** The day was profitable but with limited activity. Increase trade frequency to compound faster. More trades = more data = faster learning.");
+    recommendations.push("**Diversify strategy types.** All trades used one approach. Different regimes reward different strategies.");
   }
 
   if (recommendations.length === 0) {
-    recommendations.push("**Continue with current approach** — monitor for regime changes that might require strategy adjustments.");
-    recommendations.push("**Increase position sizing** if win rate stays above 60% over the next few days. Compounding works faster with larger bets when the edge is proven.");
+    recommendations.push("**Continue with current approach** - monitor for regime changes.");
+    recommendations.push("**Increase position sizing** if win rate stays above 60%.");
   }
 
   return recommendations.map((r) => `- ${r}`).join("\n");

@@ -8,6 +8,26 @@ import type { Position } from "../types.js";
 const BASE_URL = "https://paper-api.alpaca.markets";
 const DATA_URL = "https://data.alpaca.markets";
 
+// ─── Quote cache ──────────────────────────────────────────────────────────
+// Prevents hammering the Alpaca Data API with duplicate quote requests.
+// Only the SymbolNotionalBalance endpoint has generous limits;
+// the data API quotes endpoint is rate-limited to ~200 req/min.
+// Cache TTL: 30 seconds per ticker.
+const quoteCache = new Map<string, { price: number; timestamp: number }>();
+const QUOTE_CACHE_TTL_MS = 30_000;
+
+function getCachedQuote(symbol: string): number | null {
+  const cached = quoteCache.get(symbol);
+  if (cached && Date.now() - cached.timestamp < QUOTE_CACHE_TTL_MS) {
+    return cached.price;
+  }
+  return null;
+}
+
+function setCachedQuote(symbol: string, price: number): void {
+  quoteCache.set(symbol, { price, timestamp: Date.now() });
+}
+
 function getHeaders() {
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_SECRET_KEY;
@@ -224,6 +244,12 @@ export async function getOpenPositions(): Promise<Position[]> {
 // ─── Quotes ────────────────────────────────────────────────────────────────────
 
 export async function getLatestQuote(symbol: string): Promise<LatestQuote | null> {
+  // Check cache first
+  const cached = getCachedQuote(symbol);
+  if (cached !== null) {
+    return { askPrice: cached, bidPrice: cached };
+  }
+
   const res = await fetch(dataUrl(`/stocks/${symbol}/quotes/latest`), { headers: getHeaders() });
   if (!res.ok) {
     console.warn(`[ALPACA] Quote error for ${symbol}: ${res.status}`);
@@ -231,13 +257,24 @@ export async function getLatestQuote(symbol: string): Promise<LatestQuote | null
   }
   const data = await res.json();
   const quote = data.quote;
+  const bidPrice = parseFloat(quote.bp);
+  const askPrice = parseFloat(quote.ap);
+  const midPrice = (bidPrice + askPrice) / 2;
+  // Cache the mid price
+  setCachedQuote(symbol, midPrice);
   return {
-    askPrice: parseFloat(quote.ap),
-    bidPrice: parseFloat(quote.bp),
+    askPrice,
+    bidPrice,
   };
 }
 
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
+  // Check cache first
+  const cached = getCachedQuote(symbol);
+  if (cached !== null) {
+    return cached;
+  }
+
   // Use Alpaca's positions endpoint for the official mark price (`current_price`).
   // This is more reliable than the quote feed, especially in after-hours when
   // bid-ask spreads are wide and the last quote may be stale.
@@ -246,7 +283,9 @@ export async function getCurrentPrice(symbol: string): Promise<number | null> {
     if (res.ok) {
       const data = await res.json();
       if (data.current_price) {
-        return parseFloat(data.current_price);
+        const price = parseFloat(data.current_price);
+        setCachedQuote(symbol, price);
+        return price;
       }
     }
   } catch {
@@ -255,7 +294,12 @@ export async function getCurrentPrice(symbol: string): Promise<number | null> {
 
   // Fallback to quote API for symbols without a position
   const quote = await getLatestQuote(symbol);
-  return quote ? quote.bidPrice : null;
+  if (quote) {
+    const price = quote.bidPrice;
+    setCachedQuote(symbol, price);
+    return price;
+  }
+  return null;
 }
 
 // ─── Clock ───────────────────────────────────────────────────────────────────

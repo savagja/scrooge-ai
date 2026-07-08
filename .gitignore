@@ -17,7 +17,15 @@ env/
 
 # Bot data / logs
 data/*.json
+data/*.db* # research.db, strategies.db, WAL files
 logs/*.log
+
+# SQLite WAL files
+data/*.db-shm
+data/*.db-wal
+
+# Ad-hoc test scripts
+check_alpaca*
 
 # IDE
 .vscode/

@@ -80,32 +80,33 @@ async function main(isRetry = false) {
   const state = requireState();
 
   // ════════════════════════════════════════════════════════════
-  // STARTUP RECONCILIATION: Sync with Alpaca (skip on retries)
+  // STARTUP RECONCILIATION: Sync with Alpaca EVERY time
+  // (Not just on first call — the retry loop skips initialization
+  //  but MUST still reconcile positions & cash on each re-entry)
   // ════════════════════════════════════════════════════════════
-  if (!isRetry) {
-    console.log("🔄 Syncing with Alpaca account...");
-    try {
-      const account = await getAccount();
-      state.syncAccount(account.cash, account.settledCash);
-      console.log(`   Cash: $${account.cash.toFixed(2)} | Settled: $${account.settledCash.toFixed(2)} | Equity: $${account.equity.toFixed(2)}`);
+  console.log("🔄 Syncing with Alpaca account...");
+  try {
+    const account = await getAccount();
+    state.syncAccount(account.cash, account.settledCash);
+    console.log(`   Cash: $${account.cash.toFixed(2)} | Settled: $${account.settledCash.toFixed(2)} | Equity: $${account.equity.toFixed(2)}`);
 
-      // Backfill today's existing snapshots with Alpaca equity data
-      const today = getTradingDate();
-      const history = state.getPortfolioHistory();
-      const todaySnaps = history.filter(s => s.timestamp.slice(0, 10) === today);
-      if (todaySnaps.length > 0) {
-        // Use last_equity (prior close) as the starting baseline
-        const startEquity = account.lastEquity;
-        const currentEquity = account.equity;
-        // Linearly interpolate: early snapshots near startEquity, later ones near currentEquity
-        const total = todaySnaps.length;
-        for (let i = 0; i < total; i++) {
-          const t = total > 1 ? i / (total - 1) : 1;
-          todaySnaps[i].totalEquity = Math.round((startEquity + (currentEquity - startEquity) * t) * 100) / 100;
-        }
-        console.log(`   📊 Backfilled ${total} today's snapshots (${startEquity.toFixed(2)} -> ${currentEquity.toFixed(2)})`);
-        state.save();
+    // Backfill today's existing snapshots with Alpaca equity data
+    const today = getTradingDate();
+    const history = state.getPortfolioHistory();
+    const todaySnaps = history.filter(s => s.timestamp.slice(0, 10) === today);
+    if (todaySnaps.length > 0) {
+      // Use last_equity (prior close) as the starting baseline
+      const startEquity = account.lastEquity;
+      const currentEquity = account.equity;
+      // Linearly interpolate: early snapshots near startEquity, later ones near currentEquity
+      const total = todaySnaps.length;
+      for (let i = 0; i < total; i++) {
+        const t = total > 1 ? i / (total - 1) : 1;
+        todaySnaps[i].totalEquity = Math.round((startEquity + (currentEquity - startEquity) * t) * 100) / 100;
       }
+      console.log(`   📊 Backfilled ${total} today's snapshots (${startEquity.toFixed(2)} -> ${currentEquity.toFixed(2)})`);
+      state.save();
+    }
 
     // Reconcile open positions
     const alpacaPositions = await getOpenPositions();
@@ -150,7 +151,6 @@ async function main(isRetry = false) {
     console.warn(`      Running on internal state only.`);
   }
   console.log();
-  }
 
   // Verify market status
   const clock = await getClock();
@@ -160,43 +160,16 @@ async function main(isRetry = false) {
   console.log();
 
   if (!clock.isOpen) {
-    // ── OFF-HOURS: Build/refresh pre-market briefing ──
-    const watchlist = await getWatchlist();
-    const existing = state.getPreMarketBriefing();
-
-    // Store last build timestamp in a variable (we embed it in the briefing text)
-    const lastBriefingLine = existing
-      ? existing.match(/built at (\d+)/)?.[1]
-      : null;
-    const lastBriefingTs = lastBriefingLine ? parseInt(lastBriefingLine, 10) : 0;
-    const briefingAge = lastBriefingTs ? (Date.now() - lastBriefingTs) / 60000 : Infinity;
-
-    // Refresh every 30 minutes
-    if (!existing || briefingAge > 30) {
-      console.log(`📡 Building pre-market briefing...`);
-      const briefing = await buildPreMarketBriefing(watchlist, state);
-      state.setPreMarketBriefing(briefing);
-      console.log(`✅ Pre-market briefing saved (${briefing.split("\n").length} lines)`);
-      console.log();
-
-      state.recordActivity("briefing", "Pre-market briefing built", {
-        details: briefing.slice(0, 300),
-        metadata: { lineCount: briefing.split("\n").length, scheduled: true },
-      });
-    }
-
     console.log(`⏰ Market is closed. Retrying in ${cfg.pollIntervalMs / 1000}s...`);
 
     // ── DAILY RETROSPECTIVE ────────────────────────────────────────────────
-    // The first time the bot detects the market is closed on a new day,
-    // run the retrospective to analyze the previous trading session.
-    // We do this here (before the retry loop) because the `finally` block
-    // only runs if the event loop exits, which doesn't happen in off-hours.
+    // NOTE: The standalone retrospective process (cron job) is the primary
+    // mechanism now. This is a fallback in case cron didn't run.
     if (state.getPositions().length > 0) {
       console.log("⚠️  Market closed with open positions — closing them first...");
     }
     if (await shouldRunRetrospective(state)) {
-      console.log("\n📋 Market closed — running daily retrospective...");
+      console.log("\n📋 Market closed — running daily retrospective (in-process fallback)...");
       try {
         await runDailyRetrospective(state);
         state.recordActivity("retrospective", "Daily retrospective completed");
@@ -214,8 +187,13 @@ async function main(isRetry = false) {
   // Check for pre-market briefing
   const preMarketBriefing = state.getPreMarketBriefing();
 
-  // Create the brain
-  console.log("🧠 Initializing pi.dev agent with OpenRouter...");
+  // Clear the briefing if it exists — we don't use it anymore
+  // The strategist provides strategies, the perception prompt provides live context
+  if (preMarketBriefing) {
+    state.clearPreMarketBriefing();
+  }
+
+  // Create the brain  console.log("🧠 Initializing pi.dev agent with OpenRouter...");
   const session = await createTradingBrain(process.env.OPENROUTER_API_KEY);
   console.log("✅ Agent ready. 21 tools registered.");
   console.log();
@@ -278,37 +256,9 @@ async function main(isRetry = false) {
   });
 
   try {
-    // ── FIRST PROMPT: Inject pre-market briefing if available ──
-    const firstPrompt = preMarketBriefing
-      ? `You are now managing a $${cfg.initialCapital} cash account on Alpaca. ` +
-        `Your seed watchlist: ${cfg.watchlist.join(", ")}. ` +
-        `The market is now OPEN. ` +
-        `\n\nHere is the overnight briefing that was gathered while the market was closed:\n\n` +
-        preMarketBriefing +
-        `\n\nINITIAL TASK:\n` +
-        `1. Monitor open positions for exits (monitor_positions).\n` +
-        `2. Use the overnight briefing above to identify the most promising setups.\n` +
-        `3. Analyze 1-2 specific tickers (trade_news_momentum or trade_mean_reversion).\n` +
-        `4. If signal >= impact 4 and >= 45% confidence → PLACE A TRADE.\n` +
-        `5. Otherwise, hold_cash. Be decisive. Cash doesn't compound.`
-      : `You are now managing a $${cfg.initialCapital} cash account on Alpaca. ` +
-        `Your seed watchlist: ${cfg.watchlist.join(", ")}. ` +
-        `The market is currently OPEN. ` +
-        `\n\nFIRST TASK: ` +
-        `1. Monitor open positions for exits (monitor_positions). ` +
-        `2. Fetch market data (fetch_market_data). ` +
-        `3. Use 1-2 data sources to find opportunities — pick the most relevant for today's regime. ` +
-        `4. Analyze 2-3 specific tickers (trade_news_momentum or trade_mean_reversion). ` +
-        `5. If any analysis passes your thresholds (impact >= 4, confidence >= 45%), PLACE A TRADE. ` +
-        `6. Otherwise, hold_cash — but explain exactly why nothing passed. ` +
-        `Be decisive. Cash doesn't compound.`;
-
-    await session.prompt(firstPrompt);
-
-    // Clear the briefing so subsequent cycles use live context
-    if (preMarketBriefing) {
-      state.clearPreMarketBriefing();
-    }
+    // Just enter the event loop directly — no special first prompt.
+    // The strategist provides strategies, the perception prompt provides context.
+    // A special "first turn" adds nothing but token cost and confusion.
 
     // Continuous loop
     while (true) {
@@ -343,8 +293,17 @@ async function main(isRetry = false) {
       // Reddit, gaps, and sector movers — all gathered in parallel.
       // The agent receives this as pre-digested context in its prompt,
       // then uses tools only to dive deeper on what's interesting.
-      const watchlist = await getWatchlist();
-      const ctx = await buildMarketContext(watchlist, state);
+      // Build context ticker list from positions + active strategies only
+      // (no fixed watchlist — the trader only cares about what it holds or might enter)
+      const positionSymbols = state.getPositions().map(p => p.symbol);
+      const strategyStore = new StrategyStore("data/strategies.db");
+      const activeStrategies = strategyStore.getTopStrategies(20)
+        .filter(s => !positionSymbols.includes(s.ticker));
+      const contextTickers = [...new Set([
+        ...positionSymbols,
+        ...activeStrategies.map(s => s.ticker),
+      ])];
+      const ctx = await buildMarketContext(contextTickers, state);
 
       const marketState: MarketState = {
         timestamp: ctx.market.timestamp,
@@ -377,7 +336,7 @@ async function main(isRetry = false) {
       }
       _lastRegime = marketState.regime;
 
-      const perceptionPrompt = await buildPerceptionPrompt(marketState, ctx, state, loopCount, cfg);
+      const perceptionPrompt = await buildPerceptionPrompt(marketState, ctx, state, loopCount, cfg, currentClock);
 
       // Log this cycle to the activity stream
       const positionsForLog = state.getPositions();
@@ -407,12 +366,12 @@ async function main(isRetry = false) {
     console.error("\n💥 Fatal error:", err);
   } finally {
     // ── MARKET CLOSE: Run daily retrospective ────────────────────────────
-    // We reach here if the event loop exits (market closed, error, or process signal).
-    // Check if we've already generated today's report to avoid double-run.
+    // NOTE: The standalone retrospective process (cron job) is the primary
+    // mechanism now. This is a fallback in case cron didn't run.
     const today = getTradingDate();
     const latestReport = state.getLatestReport();
     if (!latestReport || latestReport.date !== today) {
-      console.log("\n📋 Market session ended — running daily retrospective...");
+      console.log("\n📋 Market session ended — running daily retrospective (fallback)...");
       try {
         await runDailyRetrospective(state);
         state.recordActivity("retrospective", "Daily retrospective completed — market session ended", {
@@ -434,8 +393,30 @@ async function buildPerceptionPrompt(
   ctx: any,
   state: PortfolioState,
   cycle: number,
-  cfg: ReturnType<typeof getConfig>
+  cfg: ReturnType<typeof getConfig>,
+  clock?: { timestamp: string; isOpen: boolean; nextClose: string }
 ): Promise<string> {
+  // Format current ET time from Alpaca clock for the agent
+  let etTimeStr = "";
+  let etDateStr = "";
+  if (clock) {
+    const clockTs = new Date(clock.timestamp);
+    etTimeStr = clockTs.toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    });
+    etDateStr = clockTs.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  }
   const positions = state.getPositions();
   const portfolio = state.getPortfolio();
   const memory = state.getMemory();
@@ -627,6 +608,16 @@ async function buildPerceptionPrompt(
   lines.push("");
   lines.push("═══ PRE-DIGESTED MARKET CONTEXT ═══");
   lines.push(formatContextForPrompt(ctx));
+
+  lines.push("");
+  // Inject real Alpaca clock time so the agent stops hallucinating market hours
+  if (clock && clock.isOpen) {
+    lines.push("");
+    lines.push("═══ REAL MARKET CLOCK (from Alpaca) ═══");
+    lines.push(`  Current Eastern Time: ${etDateStr} — ${etTimeStr}`);
+    lines.push(`  Market closes at: ${clock.nextClose} ET`);
+    lines.push(`  ⚠️  The market IS CURRENTLY OPEN. Do NOT declare the session over.`);
+  }
 
   lines.push("");
   lines.push("═══ AVAILABLE TOOLS ═══");

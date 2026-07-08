@@ -14,7 +14,7 @@
 import { PortfolioState } from "../state/portfolio.js";
 import { StrategyStore } from "../state/strategies.js";
 import type { DailyReport, Lesson, StrategyCalibration } from "../types.js";
-import { analyzeDay } from "./analyzer.js";
+import { analyzeDay, RetrospectiveDataBundle } from "./analyzer.js";
 import { getTradingDate } from "../config.js";
 import { integrateLessons } from "./lesson-integrator.js";
 import { runWhatIfAnalysis, formatAbstractionsForPrompt, formatWhatIfForLessons, formatWhatIfForReport } from "./what-if.js";
@@ -23,8 +23,8 @@ import { runWhatIfAnalysis, formatAbstractionsForPrompt, formatWhatIfForLessons,
  * Check whether the retrospective should run for today.
  * Returns true if no report exists for the current date yet.
  */
-export async function shouldRunRetrospective(state: PortfolioState): Promise<boolean> {
-  const today = getTradingDate();
+export async function shouldRunRetrospective(state: PortfolioState, forceDate?: string): Promise<boolean> {
+  const today = forceDate || getTradingDate();
   const latestReport = state.getLatestReport();
   return !latestReport || latestReport.date !== today;
 }
@@ -35,8 +35,8 @@ export async function shouldRunRetrospective(state: PortfolioState): Promise<boo
  * Call this at market close (or after the last cycle of the day).
  * Returns the completed DailyReport and persists it to state.json.
  */
-export async function runDailyRetrospective(state: PortfolioState, strategyStore?: StrategyStore): Promise<DailyReport> {
-  const today = getTradingDate();
+export async function runDailyRetrospective(state: PortfolioState, strategyStore?: StrategyStore, forceDate?: string): Promise<DailyReport> {
+  const today = forceDate || getTradingDate();
   console.log(`📋 Running daily retrospective for ${today}...`);
 
   // Gather raw data
@@ -69,13 +69,16 @@ export async function runDailyRetrospective(state: PortfolioState, strategyStore
   // WHAT-IF STRATEGY ANALYSIS — Grade all strategies from today
   // ═══════════════════════════════════════════════════════════════════════
   let whatIfData: Awaited<ReturnType<typeof runWhatIfAnalysis>> | null = null;
+  let store: StrategyStore;
   if (strategyStore || process.env.STRATEGIES_DB_PATH) {
-    const store = strategyStore ?? new StrategyStore(process.env.STRATEGIES_DB_PATH);
+    store = strategyStore ?? new StrategyStore(process.env.STRATEGIES_DB_PATH);
     try {
       whatIfData = await runWhatIfAnalysis(today, store, state);
     } catch (e: any) {
       console.warn(`⚠️  What-If analysis failed: ${e.message}`);
     }
+  } else {
+    store = new StrategyStore("data/strategies.db");
   }
 
   const whatIfSummary = whatIfData ? formatAbstractionsForPrompt(whatIfData) : "";
@@ -96,7 +99,9 @@ export async function runDailyRetrospective(state: PortfolioState, strategyStore
     lessonInsights,
     calibrationTable,
     history,
-    state
+    state,
+    whatIfData,
+    store
   );
 
   // Have the LLM write the analysis
@@ -196,47 +201,6 @@ export async function runDailyRetrospective(state: PortfolioState, strategyStore
 
 // ─── Data Bundle Builder ────────────────────────────────────────────────────
 
-interface RetrospectiveDataBundle {
-  date: string;
-  tradeCount: number;
-  trades: Array<{
-    symbol: string;
-    strategy: string;
-    pnl: number;
-    pnlPct: number;
-    entryPrice: number;
-    exitPrice: number;
-    exitReason: string;
-    holdMinutes: number;
-    wasPromoted: boolean;
-    signalSource: string;
-    signalConfidence: number;
-    signalImpactScore: number;
-    agentReasoning: string;
-  }>;
-  wins: number;
-  losses: number;
-  winRate: number;
-  grossPnL: number;
-  startingEquity: number;
-  endingEquity: number;
-  totalEquityChange: number;
-  tokenCost: number;
-  netPnL: number;
-  lessons: string[];
-  calibrationTable: Array<{
-    strategy: string;
-    regime: string;
-    winRate: number;
-    totalTrades: number;
-    avgWinPct: number;
-    avgLossPct: number;
-  }>;
-  equityCurve: string;      // Compact text representation
-  marketRegimes: string[];  // Regimes seen during the day
-  contextNotes: string[];   // What the agent was tracking
-}
-
 function buildDataBundle(
   date: string,
   trades: any[],
@@ -251,7 +215,9 @@ function buildDataBundle(
   lessons: string[],
   calibrationTable: any[],
   history: any[],
-  state: PortfolioState
+  state: PortfolioState,
+  whatIfData?: any,
+  strategyStore?: StrategyStore
 ): RetrospectiveDataBundle {
   // Equity curve as a compact text representation
   const equityCurve = history.length > 0
@@ -272,24 +238,89 @@ function buildDataBundle(
     (n) => `[${n.topic}]${n.ticker ? ` ${n.ticker}` : ""} — ${n.note}`
   );
 
+  // ── Strategy-aware fields ──────────────────────────────────────────
+  let whatIfSummary = "";
+  let topStrategies: Array<{ ticker: string; type: string; direction: string; grade: number; pnl: string }> = [];
+  let bottomStrategies: Array<{ ticker: string; type: string; direction: string; grade: number; pnl: string }> = [];
+  let strategyStateCounts: Record<string, number> = { anticipated: 0, developing: 0, realized: 0, active: 0, failed: 0, stale: 0 };
+  let executedStrategies: Array<{
+    ticker: string;
+    type: string;
+    direction: string;
+    state: string;
+    confidence: number;
+    catalyst: string;
+    pnl: number | null;
+    pnlPct: number | null;
+    exit_reason: string | null;
+  }> = [];
+
+  if (whatIfData) {
+    whatIfSummary = formatAbstractionsForPrompt(whatIfData);
+    topStrategies = whatIfData.strategies
+      .filter((s: any) => s.grade >= 4)
+      .map((s: any) => ({
+        ticker: s.ticker,
+        type: s.strategy_type,
+        direction: s.direction,
+        grade: s.grade,
+        pnl: `$${s.potentialGainLoss.toFixed(2)}`,
+      }));
+    bottomStrategies = whatIfData.strategies
+      .filter((s: any) => s.grade <= 2)
+      .map((s: any) => ({
+        ticker: s.ticker,
+        type: s.strategy_type,
+        direction: s.direction,
+        grade: s.grade,
+        pnl: `$${s.potentialGainLoss.toFixed(2)}`,
+      }));
+  }
+
+  if (strategyStore) {
+    strategyStateCounts = strategyStore.getStateCounts();
+    const executed = strategyStore.getExecuted(50);
+    executedStrategies = executed.map((s: any) => ({
+      ticker: s.ticker,
+      type: s.strategy_type,
+      direction: s.direction,
+      state: s.state,
+      confidence: s.confidence,
+      catalyst: s.catalyst ?? "",
+      pnl: s.pnl,
+      pnlPct: s.pnl_pct,
+      exit_reason: s.exit_reason,
+    }));
+  }
+
+  const activeStrategyCount =
+    (strategyStateCounts.anticipated ?? 0) +
+    (strategyStateCounts.developing ?? 0) +
+    (strategyStateCounts.realized ?? 0) +
+    (strategyStateCounts.active ?? 0);
+
+  // Also add direction field to trades for the new bundle
+  const tradesWithDir = trades.map((t: any) => ({
+    symbol: t.symbol,
+    strategy: t.strategy,
+    direction: t.direction ?? "long",
+    pnl: t.pnl,
+    pnlPct: t.pnlPct,
+    entryPrice: t.entryPrice,
+    exitPrice: t.exitPrice,
+    exitReason: t.exitReason,
+    holdMinutes: t.holdMinutesActual,
+    wasPromoted: t.wasPromoted,
+    signalSource: t.signalSource,
+    signalConfidence: t.signalConfidence,
+    signalImpactScore: t.signalImpactScore,
+    agentReasoning: t.agentReasoning,
+  }));
+
   return {
     date,
     tradeCount: trades.length,
-    trades: trades.map((t) => ({
-      symbol: t.symbol,
-      strategy: t.strategy,
-      pnl: t.pnl,
-      pnlPct: t.pnlPct,
-      entryPrice: t.entryPrice,
-      exitPrice: t.exitPrice,
-      exitReason: t.exitReason,
-      holdMinutes: t.holdMinutesActual,
-      wasPromoted: t.wasPromoted,
-      signalSource: t.signalSource,
-      signalConfidence: t.signalConfidence,
-      signalImpactScore: t.signalImpactScore,
-      agentReasoning: t.agentReasoning,
-    })),
+    trades: tradesWithDir,
     wins: wins.length,
     losses: losses.length,
     winRate,
@@ -300,7 +331,7 @@ function buildDataBundle(
     tokenCost: tokenCost?.totalCost ?? 0,
     netPnL: grossPnL - (tokenCost?.totalCost ?? 0),
     lessons,
-    calibrationTable: calibrationTable.map((c) => ({
+    calibrationTable: calibrationTable.map((c: any) => ({
       strategy: c.strategy,
       regime: c.regime,
       winRate: c.winRate,
@@ -311,6 +342,13 @@ function buildDataBundle(
     equityCurve,
     marketRegimes: regimes,
     contextNotes: ctxNotes,
+    // Strategy-aware fields
+    whatIfSummary,
+    activeStrategyCount,
+    topStrategies,
+    bottomStrategies,
+    strategyStateCounts,
+    executedStrategies,
   };
 }
 
