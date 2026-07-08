@@ -19,6 +19,7 @@
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
 import type { Lesson, DailyReport } from "../types.js";
+import { extractJson } from "./analyzer.js";
 
 export interface IntegratorInput {
   /** Today's date */
@@ -156,15 +157,10 @@ IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
 
-    // Extract JSON from potential markdown fences
-    let cleaned = content.replace(/```json\s*|```\s*/g, "").trim();
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) cleaned = match[0];
+    const parsed = extractJson<IntegratorOutput>(content);
 
-    const parsed = JSON.parse(cleaned) as IntegratorOutput;
-
-    if (!parsed.lessons || !Array.isArray(parsed.lessons) || parsed.lessons.length === 0) {
-      console.warn("[LESSON-INTEGRATOR] LLM returned empty lesson set — keeping existing");
+    if (!parsed || !Array.isArray(parsed.lessons) || parsed.lessons.length === 0) {
+      console.warn("[LESSON-INTEGRATOR] LLM returned invalid or empty lesson set — keeping existing");
       return input.existingLessons;
     }
 

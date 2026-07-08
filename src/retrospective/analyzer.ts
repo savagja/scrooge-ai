@@ -15,8 +15,67 @@ interface RetrospectiveAnalysis {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PUBLIC API
+// SHARED JSON EXTRACTOR — handles malformed LLM output
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract JSON from an LLM response that may include:
+ * - Markdown code fences (```json ... ```)
+ * - Trailing commas (strip before parsing)
+ * - Truncated output (attempt partial parse)
+ * - Extra text before/after the JSON
+ */
+export function extractJson<T>(text: string): T | null {
+  // Step 1: Remove markdown code fences
+  let cleaned = text.replace(/```json\s*|```\s*/g, "").trim();
+
+  // Step 2: Find the first { or [ and last } or ]
+  const firstBrace = cleaned.search(/[\[{]/);
+  const lastBrace = cleaned.lastIndexOf("}") > cleaned.lastIndexOf("]") ? cleaned.lastIndexOf("}") + 1 : cleaned.lastIndexOf("]") + 1;
+
+  if (firstBrace === -1 || lastBrace <= firstBrace) {
+    return null;
+  }
+
+  cleaned = cleaned.slice(firstBrace, lastBrace);
+
+  // Step 3: Try parsing directly
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    // Step 4: Strip trailing commas (most common LLM error)
+    try {
+      const fixed = cleaned
+        .replace(/,([\s\n]*[}\]])/g, "$1")  // Remove trailing commas before } or ]
+        .replace(/,\s*$/, "");                // Remove trailing comma at end
+      return JSON.parse(fixed) as T;
+    } catch {
+      // Step 5: Try to extract just the object by finding matching braces
+      try {
+        let depth = 0;
+        let start = -1;
+        for (let i = 0; i < cleaned.length; i++) {
+          if (cleaned[i] === "{") {
+            if (start === -1) start = i;
+            depth++;
+          } else if (cleaned[i] === "}") {
+            depth--;
+            if (depth === 0 && start !== -1) {
+              const partial = cleaned.slice(start, i + 1);
+              const fixed = partial
+                .replace(/,([\s\n]*[}\]])/g, "$1")
+                .replace(/,\s*$/, "");
+              return JSON.parse(fixed) as T;
+            }
+          }
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
 
 export async function analyzeDay(
   data: RetrospectiveDataBundle
@@ -101,11 +160,12 @@ Respond ONLY with valid JSON:
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
 
-    let cleaned = content.replace(/```json\s*|```\s*/g, "").trim();
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (match) cleaned = match[0];
+    const parsed = extractJson<RetrospectiveAnalysis>(content);
 
-    const parsed = JSON.parse(cleaned) as RetrospectiveAnalysis;
+    if (!parsed) {
+      console.warn("[RETRO] Could not parse LLM response as JSON");
+      return fallbackAnalysis(data);
+    }
 
     return {
       whatWorked: parsed.whatWorked || fallbackWhatWorked(data),
