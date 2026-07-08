@@ -124,7 +124,7 @@ Respond with ONLY valid JSON:
   ]
 }
 
-IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed. Do not drop lessons unless you set deprecated=true. Keep the total number manageable (aim for 3-10 active lessons about strategy assessment). If all existing lessons are rule-based trading rules rather than assessment patterns, deprecate them all and create 2-4 proper assessment lessons from today's evidence instead.`;
+IMPORTANT: Only output lessons that should remain active. Deprecated lessons are DROPPED from the output entirely. Return only the evolved active set (aim for 2-6 lessons). Focus on strategy assessment patterns, not trading rules. If all existing lessons are rule-based trading rules, deprecate them all and create 2-4 fresh assessment lessons from today's evidence instead.`;
 
   const userPrompt = buildIntegratorPrompt(input);
 
@@ -156,9 +156,6 @@ IMPORTANT: Return a COMPLETE set of lessons, including ones that haven't changed
 
     const raw = await res.json();
     const content: string = raw.choices?.[0]?.message?.content || "";
-
-    // DEBUG: log first 500 chars
-    console.log("[LESSON-INTEGRATOR] Raw LLM response (first 1KB):", content.slice(0, 1024));
 
     const parsed = extractJson<IntegratorOutput>(content);
 
@@ -218,7 +215,7 @@ function buildIntegratorPrompt(input: IntegratorInput): string {
   }
 
   lines.push(`---`);
-  lines.push(`Now evolve this lesson set based on today's retrospective. Consider what was learned today, what was contradicted, what should be merged, what is obsolete. Return the COMPLETE new set.`);
+  lines.push(`Now evolve this lesson set based on today's retrospective. Consider what was learned today, what was contradicted, what should be merged, what is obsolete. Return ONLY the evolved active set (2-6 lessons). DO NOT include deprecated lessons.`);
 
   return lines.join("\n");
 }
