@@ -55,7 +55,7 @@ export async function integrateLessons(input: IntegratorInput): Promise<Lesson[]
     return input.existingLessons;
   }
 
-  const model = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite";
+  const model = process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash";
 
   const systemPrompt = `You are the memory consolidation system for Scrooge, an autonomous AI trading bot.
 
