@@ -206,7 +206,7 @@ export class StrategyStore {
         entry_conditions, exit_conditions,
         created_at, updated_at,
         created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -350,6 +350,14 @@ export class StrategyStore {
     const rows = this.db.prepare(
       "SELECT * FROM strategies WHERE ticker = ? ORDER BY created_at DESC LIMIT ?"
     ).all(ticker.toUpperCase(), limit) as Record<string, unknown>[];
+    return rows.map((r) => this._rowToStrategy(r));
+  }
+
+  /** Get all strategies matching a strategy type. */
+  getByType(strategyType: string, limit: number = 50): Strategy[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM strategies WHERE strategy_type = ? ORDER BY updated_at DESC LIMIT ?'
+    ).all(strategyType, limit) as Record<string, unknown>[];
     return rows.map((r) => this._rowToStrategy(r));
   }
 

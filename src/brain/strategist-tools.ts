@@ -41,6 +41,8 @@ import {
   searchSignalsTool as _ss, describeDatasetsTool as _dd,
 } from "./tools.js";
 
+import { getSignalStore } from "../research/index.js";
+
 // ── Strategist-only: list_strategies (read existing strategies) ───────────
 
 export const listStrategiesTool = defineTool({
@@ -63,8 +65,7 @@ export const listStrategiesTool = defineTool({
       } else if (params.state) {
         strategies = store.getByState(params.state);
       } else if (params.type) {
-        // Use SQL through getTopStrategies with type filter
-        strategies = store.getTopStrategies(coerceNumber(params.topK, 50));
+        strategies = store.getByType(params.type, coerceNumber(params.topK, 50));
       } else {
         strategies = store.getTopStrategies(coerceNumber(params.topK, 30));
       }
@@ -79,7 +80,7 @@ export const listStrategiesTool = defineTool({
         lines.push(`    Thesis: ${s.thesis.slice(0, 120)}`);
         if (s.catalyst) lines.push(`    Catalyst: ${s.catalyst.slice(0, 80)}`);
         const grade = s.what_if?.grade ? `G${s.what_if.grade}/5` : "not graded";
-        lines.push(`    ID: ${s.id.slice(0, 16)}... | Grade: ${grade}`);
+        lines.push(`    ID: ${s.id} | Grade: ${grade}`);
         lines.push("");
       }
       return text(lines.join("\n"));
@@ -304,8 +305,6 @@ export const getTickerTechnicalsTool = defineTool({
 
 // ── Strategist-only: sector / macro tools ─────────────────────────────────
 
-import { getSignalStore } from "../research/index.js";
-
 export const searchSectorSignalsTool = defineTool({
   name: "search_sector_signals", label: "Search Sector Signals",
   description: "Query sector-level, macro-economic, and political/regulatory signals.",
@@ -373,6 +372,19 @@ export const createStrategyTool = defineTool({
   }),
   execute: async (_id: string, params: any) => {
     try {
+      // Coerce key_signals/risk_factors — LLMs sometimes send strings instead of arrays
+      const toArray = (v: unknown): string[] => {
+        if (Array.isArray(v)) return v;
+        if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
+        return [];
+      };
+      // Check for existing strategies on the same ticker to prevent duplicates
+      const existing = requireStrategies().getByTicker(params.ticker.toUpperCase(), 5);
+      const sameType = existing.filter(e => e.strategy_type === params.strategy_type && e.direction === (params.direction ?? "long") && (e.state === "anticipated" || e.state === "developing"));
+      if (sameType.length > 0) {
+        return text("DUPLICATE SKIPPED: Already have " + sameType[0].strategy_type + " " + sameType[0].direction + " for " + params.ticker.toUpperCase() + " (ID: " + sameType[0].id.slice(0, 24) + "...) — update existing strategy instead");
+      }
+
       const s = requireStrategies().create({
         ticker: params.ticker.toUpperCase(),
         strategy_type: params.strategy_type as StrategyType,
@@ -382,14 +394,14 @@ export const createStrategyTool = defineTool({
         timeframe: params.timeframe ?? null,
         confidence: params.confidence !== undefined ? coerceNumber(params.confidence, 0.1) : 0.1,
         rationale: params.rationale ?? "",
-        key_signals: params.key_signals ?? [],
-        risk_factors: params.risk_factors ?? [],
+        key_signals: toArray(params.key_signals),
+        risk_factors: toArray(params.risk_factors),
         conviction: params.conviction ?? "low",
         entry_conditions: params.entry_conditions ?? null,
         exit_conditions: params.exit_conditions ?? null,
         state: params.state ?? "anticipated",
       });
-      return text("Created: " + s.id.slice(0, 16) + " (" + s.ticker + " " + s.strategy_type + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%)");
+      return text("Created: " + s.id + " (" + s.ticker + " " + s.strategy_type + " " + s.state + " @" + (s.confidence * 100).toFixed(0) + "%)");
     } catch (e: any) { return text("Error: " + e.message); }
   },
 });
@@ -421,13 +433,13 @@ export const updateStrategyTool = defineTool({
       if (params.catalyst !== undefined) update.catalyst = params.catalyst;
       if (params.timeframe !== undefined) update.timeframe = params.timeframe;
       if (params.rationale !== undefined) update.rationale = params.rationale;
-      if (params.key_signals !== undefined) update.key_signals = params.key_signals;
-      if (params.risk_factors !== undefined) update.risk_factors = params.risk_factors;
+      if (params.key_signals !== undefined) update.key_signals = toArray(params.key_signals);
+      if (params.risk_factors !== undefined) update.risk_factors = toArray(params.risk_factors);
       if (params.entry_conditions !== undefined) update.entry_conditions = params.entry_conditions;
       if (params.exit_conditions !== undefined) update.exit_conditions = params.exit_conditions;
       const result = requireStrategies().update(params.strategy_id, update);
       if (!result) return text("Strategy not found: " + params.strategy_id);
-      return text("Updated: " + result.ticker + " -> " + result.state + " @" + (result.confidence * 100).toFixed(0) + "%");
+      return text("Updated: " + result.ticker + " (" + params.strategy_id.slice(0, 24) + "...) -> " + result.state + " @" + (result.confidence * 100).toFixed(0) + "%");
     } catch (e: any) { return text("Error: " + e.message); }
   },
 });
