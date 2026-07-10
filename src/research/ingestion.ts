@@ -27,6 +27,59 @@ let _watchlist: string[] = [];
 let _timerId: ReturnType<typeof setInterval> | null = null;
 let _cycleCount = 0;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// HEALTH MONITORING — Track which sources succeed/fail
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface SourceHealth {
+  name: string;
+  successes: number;
+  failures: number;
+  lastSuccess: number | null;
+  lastFailure: number | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  enabled: boolean;
+}
+
+const _sourceHealth: Record<string, SourceHealth> = {
+  yahoo_mover: { name: "Yahoo Market Movers", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  alpaca_news: { name: "Alpaca News", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  edgar: { name: "SEC EDGAR", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  reddit: { name: "Reddit Mentions", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  volume_spike: { name: "Volume Scanner", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  gap: { name: "Pre-Market Gaps", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  range_break: { name: "Range Breaks", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  macro_sector: { name: "Macro/Sector", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  fundamentals: { name: "Fundamentals", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+};
+
+function recordSourceSuccess(source: string): void {
+  const h = _sourceHealth[source];
+  if (!h) return;
+  h.successes++;
+  h.lastSuccess = Date.now();
+  h.consecutiveFailures = 0;
+}
+
+function recordSourceFailure(source: string, error: string): void {
+  const h = _sourceHealth[source];
+  if (!h) return;
+  h.failures++;
+  h.lastFailure = Date.now();
+  h.lastError = error.slice(0, 200);
+  h.consecutiveFailures++;
+
+  // Alert on consecutive failures
+  if (h.consecutiveFailures === 5) {
+    console.warn(`[HEALTH] ⚠️  ${h.name} has failed ${h.consecutiveFailures} times consecutively. Last: ${error.slice(0, 100)}`);
+  }
+  if (h.consecutiveFailures === 20) {
+    console.warn(`[HEALTH] 🔴 ${h.name} has failed ${h.consecutiveFailures} times. Disabling temporarily.`);
+    h.enabled = false;
+  }
+}
+
 export function getSignalStore(): SignalStore {
   if (!_store) throw new Error("SignalStore not initialized. Call initResearch() first.");
   return _store;
@@ -308,25 +361,62 @@ let _lastFundamentalsTime = 0;
  * One tick of the research loop — fires every `pollIntervalMs`.
  * Fetches ALL data sources and writes to the signal store.
  */
+/**
+ * Wrap a data source ingest function with health tracking.
+ * Records success/failure, auto-disables after 20 consecutive failures.
+ */
+function trackedIngest(source: string, fn: (store: SignalStore) => Promise<void>): (store: SignalStore) => Promise<void> {
+  return async (store: SignalStore) => {
+    const h = _sourceHealth[source];
+    if (h && !h.enabled) {
+      // Attempt re-enable after 100 cycles (auto-recovery)
+      if (_cycleCount % 100 === 0) {
+        h.enabled = true;
+        console.log(`[HEALTH] 🔄 Re-enabling ${h.name} after ${h.consecutiveFailures} failures`);
+      } else {
+        return; // Skip disabled sources
+      }
+    }
+
+    try {
+      await fn(store);
+      recordSourceSuccess(source);
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      recordSourceFailure(source, msg);
+      console.warn(`[RESEARCH] ${source} ingest failed: ${msg.slice(0, 150)}`);
+    }
+  };
+}
+
 async function researchTick(): Promise<void> {
   const store = getSignalStore();
   _cycleCount++;
 
-  // Fire all data sources in parallel — each has individual error handling
+  // Fire all data sources in parallel — each has individual error handling AND health tracking
   await Promise.allSettled([
-    ingestYahooMovers(store),
-    ingestAlpacaNews(store),
-    ingestEdgarFilings(store),
-    ingestRedditMentions(store),
-    ingestVolumeScans(store),
-    ingestPreMarketGaps(store),
-    ingestRangeBreaks(store),
+    trackedIngest("yahoo_mover", ingestYahooMovers)(store),
+    trackedIngest("alpaca_news", ingestAlpacaNews)(store),
+    trackedIngest("edgar", ingestEdgarFilings)(store),
+    trackedIngest("reddit", ingestRedditMentions)(store),
+    trackedIngest("volume_spike", ingestVolumeScans)(store),
+    trackedIngest("gap", ingestPreMarketGaps)(store),
+    trackedIngest("range_break", ingestRangeBreaks)(store),
   ]);
 
   // Fire macro/sector/political data sources
   await Promise.allSettled([
-    ingestMacroAndSector(store),
+    trackedIngest("macro_sector", ingestMacroAndSector)(store),
   ]);
+
+  // Log health summary every 10 cycles
+  if (_cycleCount % 10 === 0) {
+    const health = getResearchHealth();
+    const failing = Object.entries(health).filter(([, h]: [string, any]) => !h.ok).map(([k]) => k);
+    if (failing.length > 0) {
+      console.log(`[HEALTH] 📊 Sources failing: ${failing.join(", ")}`);
+    }
+  }
 
   // Prune old data every N cycles
   if (_cycleCount % PRUNE_INTERVAL_CYCLES === 0) {
@@ -342,11 +432,32 @@ async function researchTick(): Promise<void> {
     _lastFundamentalsTime = now;
     try {
       await refreshFundamentals(store, _watchlist);
+      recordSourceSuccess("fundamentals");
       console.log("[RESEARCH] Fundamentals refreshed");
     } catch (e: any) {
+      recordSourceFailure("fundamentals", e.message);
       console.warn("[RESEARCH] Fundamentals refresh failed:", e.message);
     }
   }
+}
+
+/**
+ * Get health report for all research data sources.
+ * Useful for debugging or dashboard display.
+ */
+export function getResearchHealth(): Record<string, { successes: number; failures: number; consecutiveFailures: number; lastError: string | null; enabled: boolean; ok: boolean }> {
+  const report: Record<string, any> = {};
+  for (const [key, h] of Object.entries(_sourceHealth)) {
+    report[key] = {
+      successes: h.successes,
+      failures: h.failures,
+      consecutiveFailures: h.consecutiveFailures,
+      lastError: h.lastError,
+      enabled: h.enabled,
+      ok: h.failures === 0 || (h.successes > 0 && h.consecutiveFailures < 5),
+    };
+  }
+  return report;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

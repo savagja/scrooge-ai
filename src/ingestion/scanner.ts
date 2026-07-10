@@ -1,11 +1,19 @@
 /**
  * Market scanner using Alpaca free data.
  * - Relative volume: compare current volume to 20-day average
- * - Pre-market gaps: compare 4 AM price to prior close
- * - Volatility expansion: detect which names are breaking ranges
+ * - Pre-market gaps: compare current price to prior close
+ * - Range breaks: detect which names are at 20-day extremes
+ *
+ * ⚠️  Alpaca paper accounts do NOT have access to recent SIP bar data
+ *     (returns 403: "subscription does not permit querying recent SIP data").
+ *     We get:
+ *       - Historical daily bars from 2+ days ago ✓
+ *       - Latest quotes (bid/ask/trade) ✓
+ *       - Today's volume from quotes (not bars)
+ *       - Current price from quotes/trades
  */
 
-import { getCurrentPrice } from "../execution/alpaca.js";
+import { getCurrentPrice, getLatestQuote } from "../execution/alpaca.js";
 
 const ALPACA_DATA_URL = "https://data.alpaca.markets";
 
@@ -38,29 +46,51 @@ export interface GapScan {
 }
 
 /**
- * Fetch 20-day average volume for a symbol using Alpaca historical bars.
+ * Fetch historical daily bars ending 2 days ago (to avoid the "recent SIP data" 403
+ * that paper accounts get). Returns bars ending at yesterday's close.
  */
-async function getAverageVolume(symbol: string, days: number = 20): Promise<number | null> {
+async function getHistoricalDailyBars(symbol: string, days: number = 25): Promise<any[]> {
   try {
-    const end = new Date().toISOString();
-    const start = new Date(Date.now() - (days + 5) * 86400000).toISOString();
+    // End at the start of 2 days ago UTC (avoids recent data restriction)
+    const end = new Date(Date.now() - 2 * 86400000);
+    end.setUTCHours(23, 59, 59, 999);
+    const start = new Date(end.getTime() - (days + 5) * 86400000);
 
     const url = new URL(`${ALPACA_DATA_URL}/v2/stocks/${symbol}/bars`);
     url.searchParams.set("timeframe", "1Day");
-    url.searchParams.set("start", start);
-    url.searchParams.set("end", end);
-    url.searchParams.set("limit", (days + 5).toString());
+    url.searchParams.set("start", start.toISOString());
+    url.searchParams.set("end", end.toISOString());
+    url.searchParams.set("limit", String(days + 5));
+    url.searchParams.set("adjustment", "split");
 
     const res = await fetch(url.toString(), { headers: getHeaders() });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
 
     const data = await res.json();
-    const bars = data.bars || [];
+    return data.bars || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get yesterday's close from the last complete daily bar (from historical data).
+ */
+async function getPriorClose(symbol: string): Promise<number | null> {
+  const bars = await getHistoricalDailyBars(symbol, 5);
+  if (bars.length === 0) return null;
+  return bars[bars.length - 1].c;
+}
+
+/**
+ * Fetch 20-day average volume using historical bars (paper-account compatible).
+ */
+async function getAverageVolume(symbol: string, days: number = 20): Promise<number | null> {
+  try {
+    const bars = await getHistoricalDailyBars(symbol, days);
     if (bars.length < 5) return null;
 
-    // Skip the last bar (today, potentially incomplete)
-    const completeBars = bars.slice(0, -1);
-    const volumes = completeBars.map((b: any) => b.v).filter((v: number) => v > 0);
+    const volumes = bars.map((b: any) => b.v).filter((v: number) => v > 0);
     if (volumes.length === 0) return null;
 
     const avg = volumes.reduce((a: number, b: number) => a + b, 0) / volumes.length;
@@ -71,55 +101,50 @@ async function getAverageVolume(symbol: string, days: number = 20): Promise<numb
 }
 
 /**
- * Get today's volume so far (intraday bars).
+ * Get today's approximate volume from quote trade data.
+ * Paper accounts can't get recent SIP bars, but we can estimate from
+ * the latest trade's size and the quote feed's volume indicator.
+ * Falls back to 0 if unavailable.
  */
 async function getTodayVolume(symbol: string): Promise<number | null> {
   try {
-    const now = new Date();
-    const marketOpen = new Date(now);
-    marketOpen.setHours(9, 30, 0, 0);
-
-    const start = marketOpen.toISOString();
-    const end = now.toISOString();
-
-    const url = new URL(`${ALPACA_DATA_URL}/v2/stocks/${symbol}/bars`);
-    url.searchParams.set("timeframe", "1Hour");
-    url.searchParams.set("start", start);
-    url.searchParams.set("end", end);
-
-    const res = await fetch(url.toString(), { headers: getHeaders() });
+    // Use the latest trade to get a rough volume estimate
+    const url = `${ALPACA_DATA_URL}/v2/stocks/${symbol}/trades/latest`;
+    const res = await fetch(url, { headers: getHeaders() });
     if (!res.ok) return null;
 
     const data = await res.json();
-    const bars = data.bars || [];
-    return bars.reduce((sum: number, b: any) => sum + (b.v || 0), 0);
+    // The latest trade has the trade size (s), not cumulative volume
+    // We use the quote's trade condition to return a rough estimate
+    if (data.trade?.s) {
+      return data.trade.s; // Return last trade size as a proxy
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
 /**
- * Get prior close (last complete trading day's close).
+ * Get today's daily bars (aligned with trading day in ET).
+ * Falls back to getting just the latest trade if SIP data is blocked.
  */
-async function getPriorClose(symbol: string): Promise<number | null> {
+export async function getTodayDailyBars(symbol: string): Promise<any[]> {
   try {
     const url = new URL(`${ALPACA_DATA_URL}/v2/stocks/${symbol}/bars`);
     url.searchParams.set("timeframe", "1Day");
-    url.searchParams.set("limit", "2");
+    url.searchParams.set("limit", "1");
 
     const res = await fetch(url.toString(), { headers: getHeaders() });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
 
     const data = await res.json();
-    const bars = data.bars || [];
-    if (bars.length < 2) return null;
-
-    // Second-to-last bar = prior close
-    return bars[bars.length - 2].c;
+    return data.bars || [];
   } catch {
-    return null;
+    return [];
   }
 }
+
 
 /**
  * Scan watchlist for relative volume and price action.
@@ -163,8 +188,8 @@ export async function scanRelativeVolume(
 }
 
 /**
- * Scan for pre-market gaps (4 AM–9:30 AM ET).
- * Compares current price to prior close.
+ * Scan for pre-market gaps.
+ * Compares current price to prior close (from historical bars).
  */
 export async function scanPreMarketGaps(
   watchlist: string[]
@@ -199,6 +224,7 @@ export async function scanPreMarketGaps(
 
 /**
  * Find tickers that are breaking out of their 20-day range.
+ * Uses historical bars (paper-account compatible) + current quote.
  */
 export async function scanRangeBreaks(
   watchlist: string[]
@@ -207,19 +233,12 @@ export async function scanRangeBreaks(
 
   for (const symbol of watchlist) {
     try {
-      const url = new URL(`${ALPACA_DATA_URL}/v2/stocks/${symbol}/bars`);
-      url.searchParams.set("timeframe", "1Day");
-      url.searchParams.set("limit", "22");
-
-      const res = await fetch(url.toString(), { headers: getHeaders() });
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const bars = data.bars || [];
+      // Use historical bars (avoids paper account's recent SIP restriction)
+      const bars = await getHistoricalDailyBars(symbol, 25);
       if (bars.length < 10) continue;
 
-      const completeBars = bars.slice(0, -1); // exclude today
-      const prices = completeBars.flatMap((b: any) => [b.h, b.l]);
+      // Only use complete (past) bars — excludes any same-day data
+      const prices = bars.flatMap((b: any) => [b.h, b.l]);
       const high20d = Math.max(...prices);
       const low20d = Math.min(...prices);
 

@@ -352,7 +352,24 @@ export async function getTodayBars(symbol: string): Promise<IntradayBar[]> {
     url.searchParams.set("limit", "78"); // 15-min bars × 6.5 hours = ~26 bars max
 
     const res = await fetch(url.toString(), { headers: getHeaders() });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      // Paper accounts can't get recent SIP data — use latest trade as fallback
+      const tradeRes = await fetch(`${DATA_URL}/v2/stocks/${symbol}/trades/latest`, { headers: getHeaders() });
+      if (tradeRes.ok) {
+        const tradeData = await tradeRes.json();
+        if (tradeData.trade) {
+          return [{
+            timestamp: tradeData.trade.t,
+            open: tradeData.trade.p,
+            high: tradeData.trade.p,
+            low: tradeData.trade.p,
+            close: tradeData.trade.p,
+            volume: tradeData.trade.s || 0,
+          }];
+        }
+      }
+      return [];
+    }
 
     const data = await res.json();
     const bars = data.bars || [];
@@ -534,12 +551,17 @@ export async function buildTickerContext(params: {
  */
 export async function getDailyBars(symbol: string, days: number = 10): Promise<IntradayBar[]> {
   try {
-    const start = new Date(Date.now() - (days + 5) * 86400000).toISOString();
+    // End at yesterday's close to avoid the recent SIP data restriction on paper accounts
+    const end = new Date(Date.now() - 2 * 86400000);
+    end.setUTCHours(23, 59, 59, 999);
+    const start = new Date(end.getTime() - (days + 5) * 86400000);
 
     const url = new URL(`${DATA_URL}/v2/stocks/${symbol}/bars`);
     url.searchParams.set("timeframe", "1Day");
-    url.searchParams.set("start", start);
+    url.searchParams.set("start", start.toISOString());
+    url.searchParams.set("end", end.toISOString());
     url.searchParams.set("limit", String(days + 5));
+    url.searchParams.set("adjustment", "split");
 
     const res = await fetch(url.toString(), { headers: getHeaders() });
     if (!res.ok) return [];

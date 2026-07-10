@@ -177,6 +177,50 @@ export function scoreFiling(filing: EdgarEntry): { score: number; reason: string
  */
 export function resolveTickerFromName(companyName: string): string | null {
   // Common company name mappings for quick lookup
+/**
+ * Parse EDGAR Atom feed entries manually (no XML parser dependency — avoids
+ * fast-xml-parser issues on armv7l Raspberry Pi and edge-case XML).
+ */
+function parseEdgarAtomEntries(xml: string): Array<{ id: string; title: string; content: string; link: string; updated: string }> {
+  const entries: Array<{ id: string; title: string; content: string; link: string; updated: string }> = [];
+
+  // Split by <entry> tags
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/gi;
+  let entryMatch;
+
+  while ((entryMatch = entryRegex.exec(xml)) !== null) {
+    const block = entryMatch[1];
+
+    // Helper: extract content between tags, handling CDATA
+    const extract = (tag: string): string => {
+      const cdataRegex = new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, 'i');
+      const plainRegex = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+      const m = cdataRegex.exec(block) || plainRegex.exec(block);
+      return m ? m[1].trim() : "";
+    };
+
+    // Extract href from <link> tag
+    const extractLink = (): string => {
+      const linkRegex = /<link[^>]*href="([^"]+)"[^>]*\/?>/i;
+      const m = linkRegex.exec(block);
+      if (m) return m[1];
+      const linkRelRegex = /<link[^>]*rel="alternate"[^>]*href="([^"]+)"/i;
+      const m2 = linkRelRegex.exec(block);
+      return m2 ? m2[1] : "";
+    };
+
+    entries.push({
+      id: extract("id"),
+      title: extract("title"),
+      content: extract("content"),
+      link: extractLink(),
+      updated: extract("updated") || extract("published"),
+    });
+  }
+
+  return entries;
+}
+
   const knownMappings: Record<string, string> = {
     "APPLE": "AAPL",
     "TESLA": "TSLA",
