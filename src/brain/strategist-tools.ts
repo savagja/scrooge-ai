@@ -41,6 +41,52 @@ import {
   searchSignalsTool as _ss, describeDatasetsTool as _dd,
 } from "./tools.js";
 
+// ── Strategist-only: list_strategies (read existing strategies) ───────────
+
+export const listStrategiesTool = defineTool({
+  name: "list_strategies",
+  label: "List Strategies",
+  description: "List your existing strategies. Use this BEFORE creating new ones to check if you already have a strategy for a ticker. Supports filtering by ticker, state, or type. This is how you avoid creating duplicates.",
+  parameters: Type.Object({
+    state: Type.Optional(Type.String({ description: "Filter by state: anticipated, developing, active, failed, stale" })),
+    ticker: Type.Optional(Type.String({ description: "Filter by ticker symbol" })),
+    type: Type.Optional(Type.String({ description: "Filter by strategy type" })),
+    topK: Type.Optional(NumStr),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const store = requireStrategies();
+      let strategies: any[] = [];
+      
+      if (params.ticker) {
+        strategies = store.getByTicker(params.ticker.toUpperCase(), 10);
+      } else if (params.state) {
+        strategies = store.getByState(params.state);
+      } else if (params.type) {
+        // Use SQL through getTopStrategies with type filter
+        strategies = store.getTopStrategies(coerceNumber(params.topK, 50));
+      } else {
+        strategies = store.getTopStrategies(coerceNumber(params.topK, 30));
+      }
+
+      if (strategies.length === 0) {
+        return text("No strategies found" + (params.state ? " in state: " + params.state : "") + (params.ticker ? " for ticker: " + params.ticker : "") + ".");
+      }
+
+      const lines = ["=== STRATEGIES (" + strategies.length + " found) ===", ""];
+      for (const s of strategies) {
+        lines.push(`  [${s.ticker}] ${s.strategy_type} ${s.direction} | ${s.state} | conf:${(s.confidence * 100).toFixed(0)}% conv:${s.conviction}`);
+        lines.push(`    Thesis: ${s.thesis.slice(0, 120)}`);
+        if (s.catalyst) lines.push(`    Catalyst: ${s.catalyst.slice(0, 80)}`);
+        const grade = s.what_if?.grade ? `G${s.what_if.grade}/5` : "not graded";
+        lines.push(`    ID: ${s.id.slice(0, 16)}... | Grade: ${grade}`);
+        lines.push("");
+      }
+      return text(lines.join("\n"));
+    } catch (e: any) { return text("Error: " + e.message); }
+  },
+});
+
 // ── Strategist-only: consult_strategist_lessons ──────────────────────────
 
 export const consultStrategistLessonsTool = defineTool({
@@ -271,6 +317,6 @@ export const allStrategistTools = [
   fetchMarketDataTool, fetchNewsTool, fetchAllNewsTool, fetchEdgarFilingsTool,
   scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
   scanRedditTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
-  searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool,
+  searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool, listStrategiesTool,
   createStrategyTool, updateStrategyTool, archiveStrategyTool,
 ];

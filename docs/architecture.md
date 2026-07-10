@@ -82,7 +82,10 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 | `strategist-agent.ts` | Strategist-specific: registers research-only tools |
 | `strategist-tools.ts` | Strategist tool set: all research + create_strategy, update_strategy, archive_strategy |
 | `strategist-prompt.ts` | Strategist system prompt — hypothesis formation, lifecycle management |
+| | |
+| **`src/analysis/`** | **Analysis and calculations** |
 | `analysis.ts` | Market state classification (regime detection, breadth scoring). |
+| `technicals.ts` | Technical indicator calculations (RSI, EMA, SMA, MACD, ATR, Bollinger Bands, streak detection). Pure functions, no side effects. |
 | | |
 | **`src/index-trader.ts`** | **Trader event loop.** Market check → reconciliation → read strategies → agent session → execute → reconcile. Entry point. |
 | | |

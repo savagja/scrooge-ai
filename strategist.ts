@@ -175,21 +175,32 @@ async function runStrategistSession(
       "5. get_macro_calendar — note upcoming events in next 48h\n" +
       "6. discover_opportunities — find any pre-market movers\n" +
       "7. For each signal cluster you find:\n" +
-      "   - If a clear thesis exists → create_strategy\n" +
+      "   - If a clear, differentiated thesis exists → create_strategy\n" +
       "   - If watching but unclear → create_strategy with state: anticipated, confidence ~0.2\n" +
-      "7. Review existing strategies — update their state based on overnight data\n\n" +
+      "   - Do NOT create strategies for the same theme repeatedly — one strategy per signal cluster\n" +
+      "8. Review existing strategies — update their state based on overnight data\n" +
+      "   - Consolidate duplicate strategies for the same ticker/theme — merge into one\n" +
+      "   - Archive strategies where catalyst has expired or thesis is invalidated\n" +
+      "   - Promote to developing only when 2+ independent signals converge\n\n" +
       "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
       " | Total: " + strategies.getTotalCount() + "\n\n" +
-      "Be prolific. Better 50 watching than miss one that develops."
+      "QUALITY OVER QUANTITY. One well-researched strategy beats 15 copies of the same idea. " +
+      "Do not create strategies for tickers you already have strategies for unless the new thesis is fundamentally different."
     : "=== STRATEGIST MID-SESSION UPDATE (Cycle " + cycle + ") ===\n\n" +
       "The market is open. New signals have accumulated since your last check.\n\n" +
       "YOUR TASKS:\n" +
       "1. consult_strategist_lessons — review active lessons for signal quality patterns\n" +
       "2. search_signals (since_minutes: 30) — what's changed since last check\n" +
-      "3. Update existing strategies based on new data (update_strategy)\n" +
-      "4. Create new strategies for newly observed signal clusters (create_strategy)\n" +
-      "5. Archive strategies where thesis is invalidated (archive_strategy)\n" +
-      "6. Promote strategies where signals are converging (anticipated -> developing)\n\n" +
+      "3. Review existing strategies — this is your PRIORITY. For each:\n" +
+      "   a) CONSOLIDATE: merge duplicate strategies for the same ticker/theme into one\n" +
+      "   b) PROMOTE: move anticipated -> developing when 2+ signals converge\n" +
+      "   c) KILL: archive strategies where thesis hasn't materialized in reasonable time\n" +
+      "   d) STALE: mark strategies with no new signals as stale\n" +
+      "4. Create NEW strategies ONLY for tickers you don't already track with a clearly different thesis\n" +
+      "5. Do NOT create duplicate strategies. One per ticker/thesis.\n\n" +
+      "CRITICAL: You have " + stateCounts.anticipated + " strategies stuck in 'anticipated' — " +
+      "many are duplicates. Your main job is to CONSOLIDATE and KILL, not to create more. " +
+      "A strategy that doesn't develop within 24h should be archived.\n" +
       "Focus on CROSS-SOURCE CONVERGENCE: tickers appearing in 2+ different signal types are strongest.\n" +
       "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
       " | Total: " + strategies.getTotalCount();
