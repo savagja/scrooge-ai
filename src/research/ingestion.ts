@@ -443,21 +443,19 @@ async function researchTick(): Promise<void> {
   // Clear shared price cache so scanners get fresh data
   clearPriceCache();
 
-  // Fire all data sources in parallel — each has individual error handling AND health tracking
+  // Run broad-market scanners first (no ticker list needed)
   await Promise.allSettled([
     trackedIngest("yahoo_mover", ingestYahooMovers)(store),
     trackedIngest("alpaca_news", ingestAlpacaNews)(store),
     trackedIngest("edgar", ingestEdgarFilings)(store),
-    trackedIngest("reddit", ingestRedditMentions)(store),
-    trackedIngest("volume_spike", ingestVolumeScans)(store),
-    trackedIngest("gap", ingestPreMarketGaps)(store),
-    trackedIngest("range_break", ingestRangeBreaks)(store),
-  ]);
-
-  // Fire macro/sector/political data sources
-  await Promise.allSettled([
     trackedIngest("macro_sector", ingestMacroAndSector)(store),
   ]);
+
+  // Run per-ticker scanners sequentially to share the price cache
+  await trackedIngest("reddit", ingestRedditMentions)(store);
+  await trackedIngest("volume_spike", ingestVolumeScans)(store);
+  await trackedIngest("gap", ingestPreMarketGaps)(store);
+  await trackedIngest("range_break", ingestRangeBreaks)(store);
 
   // Log health summary every 10 cycles
   if (_cycleCount % 10 === 0) {
