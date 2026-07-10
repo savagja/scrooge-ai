@@ -168,12 +168,13 @@ async function runStrategistSession(
     ? "=== STRATEGIST PRE-MARKET SESSION ===\n\n" +
       "The market opens in ~30 minutes. The research DB has been accumulating signals overnight.\n\n" +
       "YOUR TASKS:\n" +
-      "1. describe_datasets — orient yourself to what's available\n" +
-      "2. search_signals (since_minutes: 1440) — scan the past 24h of signal activity\n" +
-      "3. search_sector_signals — check for sector rotation patterns\n" +
-      "4. get_macro_calendar — note upcoming events in next 48h\n" +
-      "5. discover_opportunities — find any pre-market movers\n" +
-      "6. For each signal cluster you find:\n" +
+      "1. consult_strategist_lessons — review lessons from past retrospectives about signal quality and strategy×regime fit\n" +
+      "2. describe_datasets — orient yourself to what's available\n" +
+      "3. search_signals (since_minutes: 1440) — scan the past 24h of signal activity\n" +
+      "4. search_sector_signals — check for sector rotation patterns\n" +
+      "5. get_macro_calendar — note upcoming events in next 48h\n" +
+      "6. discover_opportunities — find any pre-market movers\n" +
+      "7. For each signal cluster you find:\n" +
       "   - If a clear thesis exists → create_strategy\n" +
       "   - If watching but unclear → create_strategy with state: anticipated, confidence ~0.2\n" +
       "7. Review existing strategies — update their state based on overnight data\n\n" +
@@ -183,11 +184,12 @@ async function runStrategistSession(
     : "=== STRATEGIST MID-SESSION UPDATE (Cycle " + cycle + ") ===\n\n" +
       "The market is open. New signals have accumulated since your last check.\n\n" +
       "YOUR TASKS:\n" +
-      "1. search_signals (since_minutes: 30) — what's changed since last check\n" +
-      "2. Update existing strategies based on new data (update_strategy)\n" +
-      "3. Create new strategies for newly observed signal clusters (create_strategy)\n" +
-      "4. Archive strategies where thesis is invalidated (archive_strategy)\n" +
-      "5. Promote strategies where signals are converging (anticipated -> developing)\n\n" +
+      "1. consult_strategist_lessons — review active lessons for signal quality patterns\n" +
+      "2. search_signals (since_minutes: 30) — what's changed since last check\n" +
+      "3. Update existing strategies based on new data (update_strategy)\n" +
+      "4. Create new strategies for newly observed signal clusters (create_strategy)\n" +
+      "5. Archive strategies where thesis is invalidated (archive_strategy)\n" +
+      "6. Promote strategies where signals are converging (anticipated -> developing)\n\n" +
       "Focus on CROSS-SOURCE CONVERGENCE: tickers appearing in 2+ different signal types are strongest.\n" +
       "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
       " | Total: " + strategies.getTotalCount();

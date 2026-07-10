@@ -124,10 +124,12 @@ The bridge between strategist and trader is `data/strategies.db` — a SQLite da
 
 ## 🧪 [Learning System](docs/learning-system.md)
 
-3-phase system that improves over time:
+3-phase system with **dual retrospective** — separate analyses for trader and strategist:
 1. Rich trade context with strategy IDs
 2. Calibration table (win-rate by strategy×regime)
 3. Vector memory (cosine similarity search for past trades)
+4. **Trader retrospective** — execution quality, trader-targeted lessons in state.json
+5. **Strategist retrospective** — hypothesis quality, strategist-targeted lessons in strategies.db
 
 ---
 
