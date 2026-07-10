@@ -47,9 +47,9 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 │                                                            │
 │  Agent: Forms hypotheses, does NOT trade                   │
 │  Tools: Research only — no execution                      │
-│  Output: data/strategies.db                                │
+│  Output: data/strategies.db + data/strategist-report.md │
 └──────────────────────────┬─────────────────────────────────┘
-                           │ writes strategies
+                           │ writes strategies + report
                            ▼
 ┌────────────────────────────────────────────────────────────┐
 │                    trader.ts                                │
@@ -57,13 +57,15 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 │                                                            │
 │  Each cycle:                                                │
 │    1. Read current positions + linked strategies           │
-│    2. Read top 10 non-position strategies from strategist  │
-│    3. Agent session: perception → execution               │
-│    4. Reconcile positions, update state.json              │
+│    2. Read strategist report (strategist-report.md)        │
+│    3. Read top 10 non-position strategies from strategist  │
+│    4. Agent session: perception → execution               │
+│    5. Reconcile positions, update state.json              │
 │                                                            │
 │  Agent: Makes enter/exit decisions                         │
-│  Tools: Execution + position management                   │
-│  Input: strategies.db + state.json + research.db          │
+│  Tools: Execution + position management ONLY              │
+│         (no research tools, no strategy-fetching tools)    │
+│  Input: strategies.db + state.json + strategist-report.md │
 └──────────────────────────┬─────────────────────────────────┘
                            │
                            ▼
@@ -104,14 +106,18 @@ The strategist is an **anticipatory researcher** that forms hypotheses and track
 
 ### [Trader](docs/trader.md) — The Execution Specialist
 
-The trader receives pre-vetted strategies from the strategist and decides what to enter and exit. It has execution tools only — no deep research capabilities.
+The trader receives pre-vetted strategies directly in its prompt (from `data/strategies.db`)
+along with the strategist's narrative report (`data/strategist-report.md`). It has **execution
+tools only** — no research tools, no strategy-fetching tools. It cannot look up tickers beyond
+what's provided. Its job: manage positions, read the strategist's analysis, and execute or hold.
 
 ---
 
 ## 🔄 [Execution Flow](docs/execution-flow.md)
 
-- **Pre-market (T-30 min):** Strategist sweeps research DB, forms initial strategy slate
+- **Pre-market (T-30 min):** Strategist sweeps research DB, forms initial strategy slate, writes report
 - **Trading session (open → close):** Trader runs event loop every ~2 min; strategist re-runs every 6th cycle
+- **Each trader cycle:** Positions first → read strategist report → cross-reference with structured strategies → execute or hold
 - **Market close:** Daily retrospective, final state save, strategist wrap-up
 
 ---
@@ -183,7 +189,8 @@ The research engine (`data/research.db`) runs 24/7, accumulating signals from al
 | Agent reacts to current data only | Strategist anticipates, creates lifecycle-tracked strategies |
 | No strategy persistence | `data/strategies.db` with 6-state lifecycle |
 | No linkage between position and research | Each position has a strategy_id linking back to the strategist's thesis |
-| Discovery/research tools in execution context | Strategist has research tools; Trader has execution tools |
+| Discovery/research tools in execution context | Strategist has research tools; Trader has execution tools only |
+| No strategist-to-trader narrative flow | Strategist writes `data/strategist-report.md` per session; trader reads it every cycle |
 
 ### What Stays the Same
 

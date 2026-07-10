@@ -11,9 +11,13 @@ Strategist launches
   │   2. search_signals — find what's happening across the market
   │   3. search_sector_signals — check sector rotation / macro context
   │   4. get_macro_calendar — note any upcoming events in next 48h
-  │   5. For each identified opportunity: create_strategy with thesis, confidence, state
-  │   6. End session
+  │   5. query_technical_indicators — screen for RSI extremes, Bollinger breaks, EMA alignment
+  │   6. For each identified opportunity: create_strategy with thesis, confidence, state
+  │   7. End session
   ├─ Save strategy slate to strategies.db
+  ├─ Generate strategist report → data/strategist-report.md
+  │     Includes: market summary, strategy overview, top strategies with explanations,
+  │               strategist's raw session output as commentary
   └─ Wait for market open
 ```
 
@@ -31,7 +35,8 @@ Trader launches
        │     ├─ Agent session: update existing strategies, create new ones
        │     ├─ Promote/demote lifecycle states
        │     ├─ Prune stale strategies
-       │     └─ Save to strategies.db
+       │     ├─ Save to strategies.db
+       │     └─ Generate strategist report → data/strategist-report.md
        │
        ├─ 3. Build perception prompt:
        │     ├─ Current market state (VIX, SPY, regime, breadth)
@@ -39,20 +44,24 @@ Trader launches
        │     ├─ For EACH open position:
        │     │    ├─ Full price context (30d, 1d, volume, vs SPY)
        │     │    ├─ Risk metrics (stops, P&L, peak, trailing stop)
-       │     │    └─ LINKED STRATEGY (thesis, catalyst, status at entry)
-       │     ├─ TOP 10 ACTIVE STRATEGIES (non-position) sorted by confidence × freshness
-       │     │    ├─ Each: ticker, strategy_type, direction, state, confidence
-       │     │    ├─ Thesis summary, catalyst, timeframe
-       │     │    └─ Key signals supporting the strategy
+       │     │    └─ LINKED STRATEGY (thesis, catalyst, status at entry, what-if grade)
+       │     ├─ TOP 10 CANDIDATE STRATEGIES (non-position) sorted by state > conviction > confidence > recency
+       │     │    ├─ Each: ticker, strategy_type, direction, state, conviction, confidence
+       │     │    ├─ Thesis summary, catalyst, timeframe, entry/exit conditions
+       │     │    ├─ What-if historical grade (1-5) + hypothetical P&L
+       │     │    └─ Real-time price context + why-this-rank explanation
+       │     ├─ STRATEGIST'S BRIEFING — full strategist report injected from data/strategist-report.md
+       │     │    Provides narrative context, market summary, strategy overview, ranking explanations
        │     ├─ Active lessons from retrospective
        │     └─ Pre-digested market context (news, movers, EDGAR, volume)
        │
        ├─ 4. Agent session — trader decides:
-       │     ├─ "Does the position strategy still hold? If invalidated → exit."
-       │     ├─ "Which of the top 10 strategies is most actionable RIGHT NOW?"
-       │     ├─ "I have $X cash. Which strategy deserves capital?"
-       │     ├─ Call tools: get ticker context, check memory, execute
-       │     └─ Record decision
+       │     ├─ 1. Review current positions — check linked strategy validity
+       │     ├─ 2. Read strategist briefing for narrative context
+       │     ├─ 3. Cross-reference strategist reasoning with structured strategy data
+       │     ├─ 4. For exits: close_position → place_sell_order → update_strategy_on_exit
+       │     ├─ 5. For entries: consult_memory → place_buy_order / place_short_order / hold_cash
+       │     └─ 6. Record decision
        │
        ├─ 5. Execute trades (risk guardrails validate)
        ├─ 6. Reconcile positions, update P&L, snapshots
@@ -99,7 +108,7 @@ Retrospective process launches (independent process via cron/systemd-timer):
 Strategist launches
   ├─ 1. consult_strategist_lessons — read evolved lessons from last night's retro
   ├─ 2. Then normal pre-market flow (research DB, signals, create strategies)
-  ...
+  └─ 3. Generate strategist report → data/strategist-report.md
 ```
 
 ### Next Day Trading Session
@@ -107,6 +116,6 @@ Strategist launches
 ```
 Trader launches
   ├─ consult_memory — reads evolved trader lessons
-  ├─ Then normal event loop
+  ├─ Then normal event loop (strategist report injected from file)
   ...
 ```

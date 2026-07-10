@@ -2,53 +2,55 @@
 
 ## Philosophy
 
-The trader is an **execution specialist**. It receives:
+The trader is an **execution-only specialist**. It receives:
 - Current positions with their linked strategies (thesis, catalyst, confidence at entry)
-- Top 10 non-position strategies from the strategist, ranked by confidence × freshness
+- Top 10 non-position strategies from the strategist, ranked by confidence × conviction × freshness
+- The strategist's latest markdown report with narrative context, market summary, and reasoning
 - Full market context (VIX, SPY, regime, news, movers)
 
-It decides **what to enter** and **what to exit**. It does NOT do deep research — that's the strategist's job.
+It decides **what to exit** (positions first) and **what to enter** using the strategist's pre-vetted candidates. It does NOT do research — the strategist provides all analysis and the trader has no research tools.
 
 ## Trader Tools
 
-The trader gets execution tools + position management. The strategy-management tools are read-only. Pure research tools (discovery, Reddit, EDGAR search) are removed — the trader relies on the strategist's output.
+The trader has **no research tools** and **no strategy-fetching tools**. All candidate strategies are injected directly into every cycle's prompt. The strategist's report is read from `data/strategist-report.md` and injected as a briefing section.
 
 | Tool | Purpose |
 |------|---------|
-| `fetch_market_data` | VIX, SPY, regime, breadth |
-| `fetch_news` | Quick headline check for specific tickers |
-| `get_active_strategies` | **Read** — Fetch top 10 non-position strategies + position-linked strategies |
-| `update_strategy_on_exit` | **Write** — Mark a strategy as active/failed when a position closes |
+| `check_portfolio` | View cash, P&L, open positions |
 | `monitor_positions` | Check all open positions' exit conditions |
-| `close_position` | Evaluate whether a position's strategy still holds |
 | `place_buy_order` | Enter a long position (risk guardrails validate) |
 | `place_short_order` | Enter a short position (risk guardrails validate) |
 | `place_sell_order` | Exit a position (covers both longs and shorts) |
+| `close_position` | Evaluate whether a position's strategy still holds |
 | `hold_cash` | Explicitly do nothing (forces reasoning) |
 | `record_decision` | Log what was decided and why |
-| `consult_memory` | Check **trader** lessons and similar past trades before deciding. Lessons cover execution timing, exit discipline, position sizing, and strategy selection patterns. Updated daily by the trader retrospective. |
+| `consult_memory` | Check **trader** lessons and similar past trades before deciding |
+| `reflect_on_performance` | End-of-session retrospective |
+| `emergency_close_all` | Emergency risk — shut everything down |
+| `note_context` / `view_context` / `prune_context` | Persistent agent-curated context notes |
+| `update_strategy_on_exit` | Report position outcome back to the strategist |
 
-## Trader Prompt Philosophy — Strategy-Aware
+## Data Flow
 
 ```
-You are Scrooge's trader — you execute strategies formed by the strategist.
+Strategist writes to:
+  ├─ data/strategies.db        ← lifecycle-tracked strategies
+  └─ data/strategist-report.md ← narrative report (per session)
 
-STRATEGIES are pre-vetted hypotheses. You do NOT create them.
-You decide: "Does this strategy deserve capital RIGHT NOW?"
-
-For each OPEN POSITION:
-  - Its strategy tells you the original thesis (catalyst, regime, confidence)
-  - Compare THAT against current conditions
-  - If thesis is invalidated → exit even if stops haven't hit
-  - If thesis is confirmed → let the trailing stop ride
-
-For each CANDIDATE STRATEGY (top 10):
-  - Each has a confidence score, lifecycle state, and thesis
-  - A "developing" strategy is more actionable than an "anticipated" one
-  - Consider: does current price action confirm the strategist's thesis?
-  - If yes → place_buy_order or place_short_order
-  - If no → skip and explain why
-
-You are the trigger finger, not the brain. Trust the strategist's research,
-but verify with price action before pulling the trigger.
+Trader reads on each cycle:
+  ├─ data/strategies.db        ← via StrategyStore (top 10 + linked)
+  ├─ data/strategist-report.md ← via readFileSync (injected into prompt)
+  └─ data/state.json           ← portfolio state, memory, lessons
 ```
+
+## Trader Prompt Flow
+
+Each cycle's prompt follows this structure:
+
+1. **Current positions** with full price context + linked strategy data (thesis, catalyst, what-if grade)
+2. **Top candidate strategies** (up to 10) with metadata, what-if historical grades, and real-time price context
+3. **Strategist's Briefing** — the full strategist report markdown, providing narrative context and reasoning
+4. **Pre-digested market context** (VIX, SPY, news, movers, volume)
+5. **Real market clock** from Alpaca
+6. **Available tools** — only execution tools listed
+7. **Restrictions** reminder: no research capability, no strategy fetching, must use only what's in the prompt

@@ -2,9 +2,17 @@
 
 ## Philosophy
 
-The strategist is an **anticipatory researcher**, not a trader. It forms hypotheses about what might happen and tracks them through a lifecycle of 5 states. It creates strategies based on signal density from the research DB — it does NOT invent things on quiet days.
+The strategist is an **anticipatory researcher**, not a trader. It forms hypotheses about what might happen and tracks them through a lifecycle of 6 states. It creates strategies based on signal density from the research DB — it does NOT invent things on quiet days.
 
 **No hard cap on strategies.** If 50 tickers have signal activity, the strategist creates 50 strategies. The trader only sees the top 10. Low-confidence or stale strategies auto-prune.
+
+After each session (pre-market and mid-session), the strategist writes a structured markdown report to `data/strategist-report.md` containing:
+- Market summary (VIX, SPY, regime)
+- Strategy overview (state distribution counts)
+- Top strategies with explanations of ranking
+- The strategist's raw LLM output as commentary
+
+The trader reads this report on every cycle to understand the narrative context behind the ranked strategies.
 
 ## Strategy Lifecycle
 
@@ -67,6 +75,8 @@ The strategist gets **no execution tools**. It cannot place orders, check positi
 | `search_sector_signals` | Sector, macro, and political/regulatory signals |
 | `get_macro_calendar` | Upcoming CPI, FOMC, NFP, PPI events |
 | `describe_datasets` | See what data is in the research DB |
+| `query_technical_indicators` | Screen all tickers by RSI, Bollinger bands, EMA alignment, candle streaks, SMA position |
+| `get_single_ticker_technicals` | Full technical indicator breakdown for a single ticker |
 | `consult_memory` | **Read-only** — check past trade outcomes for similar setups |
 | `consult_strategist_lessons` | **Strategist's own lessons** — signal quality, strategy×regime fit, catalyst assessment patterns. Updated daily by the strategist retrospective. Call at session start. |
 | `list_strategies` | **List existing strategies** — filter by ticker, state, or type. Use BEFORE creating new strategies to check for duplicates and manage lifecycle. |
@@ -90,4 +100,9 @@ Your job:
 
 Better to create 50 low-confidence "watching" strategies than miss the one that develops.
 The trader only sees the top 10 by confidence × freshness.
+
+After each session, the system generates a structured markdown report and writes
+it to data/strategist-report.md. The report includes the market summary, strategy
+overview, top strategies with explanations, and your session output as commentary.
+This report is injected into the trader's prompt on every cycle.
 ```

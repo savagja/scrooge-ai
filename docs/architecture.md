@@ -14,13 +14,13 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
                                    ▼
 ┌────────────────────────────────────────────────────────────┐
 │                    strategist.ts                            │
-│  Pre-market (T-30min): Full sweep → initial strategy slate│
-│  During market (every 6th trader cycle): Refine strategies │
-│  Market close: Wrap-up summary                             │
-│                                                            │
-│  Agent: Forms hypotheses, does NOT trade                   │
-│  Tools: Research only — no execution                      │
-│  Output: data/strategies.db                                │
+│  Pre-market (T-30min): Full sweep → initial strategy slate→ report│
+│  During market (every 6th trader cycle): Refine strategies → report│
+│  Market close: Wrap-up summary                                    │
+│                                                                   │
+│  Agent: Forms hypotheses, does NOT trade                          │
+│  Tools: Research only — no execution                              │
+│  Output: data/strategies.db + data/strategist-report.md           │
 └──────────────────────────┬─────────────────────────────────┘
                            │ writes strategies
                            ▼
@@ -30,13 +30,16 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 │                                                            │
 │  Each cycle:                                                │
 │    1. Read current positions + linked strategies           │
-│    2. Read top 10 non-position strategies from strategist  │
-│    3. Agent session: perception → execution               │
-│    4. Reconcile positions, update state.json              │
+│    2. Read strategist report (data/strategist-report.md)   │
+│    3. Read top 10 non-position strategies from strategist  │
+│    4. Agent session: perception → execution               │
+│    5. Reconcile positions, update state.json              │
 │                                                            │
 │  Agent: Makes enter/exit decisions                         │
-│  Tools: Execution + position management                   │
-│  Input: strategies.db + state.json + research.db          │
+│  Tools: Execution + position management only              │
+│         (no research tools, no strategy-fetching tools)    │
+│  Input: strategies.db + state.json + strategist-report.md +│
+│         research.db (pre-digested context only)            │
 └──────────────────────────┬─────────────────────────────────┘
                            │
                            ▼
@@ -76,18 +79,16 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 | | |
 | **`src/brain/`** | **Agent personality and tools** |
 | `agent.ts` | pi.dev SDK agent session setup base — shared by strategist and trader |
-| `trader-agent.ts` | Trader-specific: registers execution tools, position management tools |
-| `trader-tools.ts` | Trader tool set: place_buy_order, place_short_order, place_sell_order, hold_cash, monitor_positions, close_position, consult_memory, get_active_strategies, update_strategy_on_exit, fetch_market_data |
-| `trader-prompt.ts` | Trader system prompt — position-focused, strategy-aware |
+| `trader-agent.ts` | Trader-specific: registers execution-only tools (no research, no strategy fetching) |
 | `strategist-agent.ts` | Strategist-specific: registers research-only tools |
-| `strategist-tools.ts` | Strategist tool set: all research + create_strategy, update_strategy, archive_strategy |
-| `strategist-prompt.ts` | Strategist system prompt — hypothesis formation, lifecycle management |
+| `tools.ts` | **All tool definitions** — both trader's execution tools and strategist's research tools in one file |
+| `strategist-tools.ts` | Strategist-only tool set: research + strategy CRUD + technical indicators |
 | | |
 | **`src/analysis/`** | **Analysis and calculations** |
 | `analysis.ts` | Market state classification (regime detection, breadth scoring). |
 | `technicals.ts` | Technical indicator calculations (RSI, EMA, SMA, MACD, ATR, Bollinger Bands, streak detection). Pure functions, no side effects. |
 | | |
-| **`src/index-trader.ts`** | **Trader event loop.** Market check → reconciliation → read strategies → agent session → execute → reconcile. Entry point. |
+| **`src/index.ts`** | **Trader event loop.** Market check → reconciliation → perception prompt (with strategist report injection) → agent session → execute → reconcile. Entry point for `trader.ts`. |
 | | |
 | **`src/index-strategist.ts`** | **Strategist event loop.** Timer-based, runs pre-market + during market every N cycles. No market clock dependency. Entry point. |
 | | |
@@ -119,8 +120,8 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 | `strategist-retrospective.ts` | Strategist retro — hypothesis quality, strategist lessons → strategies.db |
 | | |
 | **Entry scripts (root)** | |
-| `strategist.ts` | CLI entry for the strategist: `tsx strategist.ts` |
-| `trader.ts` | CLI entry for the trader: `tsx trader.ts` |
+| `strategist.ts` | CLI entry for the strategist: `tsx strategist.ts`. Includes strategist report generator (`generateStrategistReport()`) that writes to `data/strategist-report.md`. |
+| `trader.ts` | CLI entry for the trader: `tsx trader.ts`. Imports and runs `src/index.ts`. |
 
 ### Configuration & Secrets
 
@@ -149,6 +150,7 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 
 | Path | Purpose |
 |------|---------|
+| `data/strategist-report.md` | **Strategist report** — Markdown report generated after each strategist session (pre-market + mid-session). Injected into the trader's perception prompt on every cycle. Provides narrative market summary, strategy overview, and ranking explanations. Auto-generated, **not committed to git.** |
 | `data/state.json` | **Runtime state** — all trades, portfolio snapshots, calibration table, vector memory. Auto-created. **Not committed to git.** |
 | `data/strategies.db` | **Strategy database** — SQLite. All strategies with lifecycle states. **Not committed to git.** |
 | `data/research.db` | **Research database** — SQLite. Signals, fundamentals, corporate events. **Not committed to git.** |

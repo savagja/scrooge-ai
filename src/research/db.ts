@@ -7,7 +7,7 @@
  * No LLM involvement in data collection, aggregation, or storage.
  */
 
-import initSqlJs, { type Database } from "sql.js";
+import initSqlJs, { type Database, type SqlValue } from "sql.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import crypto from "crypto";
@@ -779,11 +779,11 @@ export class SignalStore {
     const placeholders = fields.map(() => "?").join(", ");
     const updates = fields.map((f) => `${f} = COALESCE(?, ${f})`).join(", ");
 
-    const values = fields.map((f) => {
+    const values: SqlValue[] = fields.map((f) => {
       const v = indicators[f];
       if (v === null || v === undefined) return null;
       if (typeof v === "boolean") return v ? 1 : 0;
-      return v;
+      return v as SqlValue;
     });
 
     db.run(
@@ -829,7 +829,7 @@ export class SignalStore {
   }): Record<string, unknown>[] {
     const db = this.assertReady();
     const conditions: string[] = [];
-    const bindings: unknown[] = [];
+    const bindings: SqlValue[] = [];;
 
     if (params.minRsi !== undefined) {
       conditions.push("rsi_14 >= ?");
