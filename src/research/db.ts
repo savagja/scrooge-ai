@@ -57,7 +57,8 @@ export type SignalSource =
   | "reddit"
   | "volume_spike"
   | "gap"
-  | "range_break";
+  | "range_break"
+  | "technicals";
 
 export type CorporateEventType =
   | "earnings"
@@ -233,6 +234,36 @@ const SCHEMA_SQL = [
           SUM(bullish_ct) AS total_bullish,
           SUM(bearish_ct) AS total_bearish
    FROM signal_daily GROUP BY bucket_date, ticker`,
+  `CREATE TABLE IF NOT EXISTS technical_indicators (
+    symbol               TEXT NOT NULL,
+    timestamp            TEXT NOT NULL,  -- date of the last bar used (YYYY-MM-DD)
+    sma_20               REAL,
+    sma_50               REAL,
+    sma_200              REAL,
+    ema_8                REAL,
+    ema_21               REAL,
+    ema_50               REAL,
+    rsi_14               REAL,
+    macd_line            REAL,
+    macd_signal          REAL,
+    macd_histogram       REAL,
+    atr_14               REAL,
+    bollinger_upper      REAL,
+    bollinger_middle     REAL,
+    bollinger_lower      REAL,
+    bollinger_band_pct   REAL,
+    consecutive_up       INTEGER NOT NULL DEFAULT 0,
+    consecutive_down     INTEGER NOT NULL DEFAULT 0,
+    close_above_sma_20   INTEGER,
+    close_above_sma_50   INTEGER,
+    ema_8_above_ema_21   INTEGER,
+    ema_21_above_ema_50  INTEGER,
+    PRIMARY KEY (symbol, timestamp)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ti_symbol ON technical_indicators(symbol)`,
+  `CREATE INDEX IF NOT EXISTS idx_ti_ts ON technical_indicators(timestamp)`,
+  `CREATE INDEX IF NOT EXISTS idx_ti_rsi ON technical_indicators(rsi_14)`,
+  `CREATE INDEX IF NOT EXISTS idx_ti_bb ON technical_indicators(bollinger_band_pct)`,
   `CREATE TABLE IF NOT EXISTS _internal (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -722,6 +753,141 @@ export class SignalStore {
     return rowsToObjects(result[0].columns, result[0].values);
   }
 
+  // ── TECHNICAL INDICATORS ───────────────────────────────────────────────
+
+  /**
+   * Upsert technical indicators for a symbol on a given date.
+   * Inserts or replaces the row for (symbol, timestamp).
+   */
+  upsertTechnicalIndicators(symbol: string, indicators: Record<string, unknown>): void {
+    const db = this.assertReady();
+    const sym = symbol.toUpperCase();
+
+    const fields = [
+      "sma_20", "sma_50", "sma_200",
+      "ema_8", "ema_21", "ema_50",
+      "rsi_14",
+      "macd_line", "macd_signal", "macd_histogram",
+      "atr_14",
+      "bollinger_upper", "bollinger_middle", "bollinger_lower", "bollinger_band_pct",
+      "consecutive_up", "consecutive_down",
+      "close_above_sma_20", "close_above_sma_50",
+      "ema_8_above_ema_21", "ema_21_above_ema_50",
+    ];
+
+    const cols = fields.join(", ");
+    const placeholders = fields.map(() => "?").join(", ");
+    const updates = fields.map((f) => `${f} = COALESCE(?, ${f})`).join(", ");
+
+    const values = fields.map((f) => {
+      const v = indicators[f];
+      if (v === null || v === undefined) return null;
+      if (typeof v === "boolean") return v ? 1 : 0;
+      return v;
+    });
+
+    db.run(
+      `INSERT INTO technical_indicators (symbol, timestamp, ${cols})
+       VALUES (?, ?, ${placeholders})
+       ON CONFLICT(symbol, timestamp) DO UPDATE SET
+         ${updates}`,
+      [sym, String(indicators.timestamp ?? ""), ...values]
+    );
+    this._save();
+  }
+
+  /**
+   * Get the latest technical indicators for a symbol.
+   * Returns null if none found.
+   */
+  getLatestTechnicalIndicators(symbol: string): Record<string, unknown> | null {
+    const db = this.assertReady();
+    const result = db.exec(
+      `SELECT * FROM technical_indicators WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`,
+      [symbol.toUpperCase()]
+    );
+    if (result.length === 0 || result[0].values.length === 0) return null;
+    return rowsToObjects(result[0].columns, [result[0].values[0]])[0];
+  }
+
+  /**
+   * Query technical indicators with filters.
+   * Useful for finding tickers matching specific technical setups.
+   */
+  queryTechnicalIndicators(params: {
+    minRsi?: number;
+    maxRsi?: number;
+    minConsecutiveUp?: number;
+    minConsecutiveDown?: number;
+    aboveBollingerUpper?: boolean;
+    belowBollingerLower?: boolean;
+    emaBullishAlignment?: boolean;
+    emaBearishAlignment?: boolean;
+    aboveSma50?: boolean;
+    belowSma50?: boolean;
+    limit?: number;
+  }): Record<string, unknown>[] {
+    const db = this.assertReady();
+    const conditions: string[] = [];
+    const bindings: unknown[] = [];
+
+    if (params.minRsi !== undefined) {
+      conditions.push("rsi_14 >= ?");
+      bindings.push(params.minRsi);
+    }
+    if (params.maxRsi !== undefined) {
+      conditions.push("rsi_14 <= ?");
+      bindings.push(params.maxRsi);
+    }
+    if (params.minConsecutiveUp !== undefined) {
+      conditions.push("consecutive_up >= ?");
+      bindings.push(params.minConsecutiveUp);
+    }
+    if (params.minConsecutiveDown !== undefined) {
+      conditions.push("consecutive_down >= ?");
+      bindings.push(params.minConsecutiveDown);
+    }
+    if (params.aboveBollingerUpper === true) {
+      conditions.push("bollinger_band_pct > 1.0");
+    }
+    if (params.belowBollingerLower === true) {
+      conditions.push("bollinger_band_pct < 0");
+    }
+    if (params.emaBullishAlignment === true) {
+      conditions.push("ema_8_above_ema_21 = 1 AND ema_21_above_ema_50 = 1");
+    }
+    if (params.emaBearishAlignment === true) {
+      conditions.push("ema_8_above_ema_21 = 0 AND ema_21_above_ema_50 = 0");
+    }
+    if (params.aboveSma50 === true) {
+      conditions.push("close_above_sma_50 = 1");
+    }
+    if (params.belowSma50 === true) {
+      conditions.push("close_above_sma_50 = 0");
+    }
+
+    // Only get the latest record per symbol using a subquery
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = params.limit ?? 50;
+
+    // Get the latest timestamp for each symbol
+    const sql = `
+      SELECT t.* FROM technical_indicators t
+      INNER JOIN (
+        SELECT symbol, MAX(timestamp) AS max_ts
+        FROM technical_indicators
+        GROUP BY symbol
+      ) latest ON t.symbol = latest.symbol AND t.timestamp = latest.max_ts
+      ${whereClause}
+      ORDER BY t.rsi_14 ASC
+      LIMIT ?
+    `;
+
+    const result = db.exec(sql, [...bindings, limit]);
+    if (result.length === 0 || result[0].values.length === 0) return [];
+    return rowsToObjects(result[0].columns, result[0].values);
+  }
+
   // ── PRUNING ────────────────────────────────────────────────────────────
 
   /**
@@ -796,7 +962,7 @@ export class SignalStore {
 
   getTableInfo(): TableInfo[] {
     const db = this.assertReady();
-    const tables = ["tickers", "signals", "signal_hourly", "signal_daily", "fundamentals", "corporate_events", "sector_signals", "macro_events"];
+    const tables = ["tickers", "signals", "signal_hourly", "signal_daily", "fundamentals", "corporate_events", "sector_signals", "macro_events", "technical_indicators"];
     const info: TableInfo[] = [];
 
     for (const name of tables) {

@@ -13,7 +13,7 @@ The research engine discovers tickers autonomously — no static watchlist. Ever
 | Layer | Sources | Scope | Watchlist Needed? |
 |-------|---------|-------|-------------------|
 | **Broad discovery** | Yahoo movers, Alpaca news, EDGAR high-impact | Entire market | No |
-| **Per-ticker analysis** | Volume, gaps, range breaks, Reddit | Top ~100 tickers from DB | Dynamic (from DB) |
+| **Per-ticker analysis** | Volume, gaps, range breaks, Reddit, technical indicators | Top ~100 tickers from DB | Dynamic (from DB) |
 | **Fundamentals** | Asset metadata (name, sector) | Same dynamic set | Dynamic (from DB) |
 | **Macro/sector** | Fed RSS, macro calendar, earnings | Market-wide | No |
 
@@ -44,6 +44,7 @@ Every research tick (every 120s):
   │  ├─ Pre-market gaps                                      │
   │  ├─ Range breaks (20-day highs/lows)                     │
   │  ├─ Reddit mention velocity                              │
+  │  ├─ Technical indicators (RSI, EMA, MACD, Bollinger)     │
   │  └─ Corporate events (earnings, SEC filings)             │
   └──────────────────────────────────────────────────────────┘
                              │
@@ -68,7 +69,7 @@ This means a ticker is "in the system" from the moment any source reports it. No
 
 ## Per-Ticker Scanning
 
-Per-ticker scanners (volume, gaps, range breaks, Reddit) use a **dynamic ticker set** rebuilt every cycle from:
+Per-ticker scanners (volume, gaps, range breaks, Reddit, technical indicators) use a **dynamic ticker set** rebuilt every cycle from:
 1. Core seed tickers (SPY, QQQ, IWM, AAPL, MSFT, AMZN, GOOGL, META, NVDA, TSLA)
 2. Tickers with signals in the last 7 days
 
@@ -86,6 +87,7 @@ This means:
 | **SEC EDGAR RSS** | 8-K corporate filings with material event items (1.01, 2.02, 5.02, 7.01, 8.01, 2.01) | `sec.gov/cgi-bin/browse-edgar` Atom feed | Any filing with high-impact items |
 | **Reddit** | Mention velocity from r/wallstreetbets, r/stocks, r/wallstreetbetselite | `old.reddit.com` JSON + RSS fallback | Dynamic ticker set only |
 | **Alpaca Data API** | Historical bars (20-day avg volume), latest quotes/trades | `v2/stocks/{symbol}/bars`, `/quotes/latest`, `/trades/latest` | Dynamic ticker set only |
+| **Technical Indicator Scanner** | Computes RSI(14), EMA(8/21/50), SMA(20/50/200), MACD(12,26,9), ATR(14), Bollinger Bands (20,2), and candle streak detection from daily bars | Derived from Alpaca daily bars via `src/analysis/technicals.ts` | Dynamic ticker set only (via research engine) |
 | **Fed RSS** | Federal Reserve press releases (rate decisions, monetary policy, stress tests) | `federalreserve.gov/feeds/press_all.xml` | Market-wide |
 | **Macro Calendar** | Hardcoded expected dates for CPI, FOMC, NFP, PPI (updated quarterly) | Hardcoded in `macro.ts` | Market-wide |
 
@@ -98,6 +100,7 @@ This means:
 | `signal_hourly` | Hourly aggregates (counts, avg/max score, bullish/bearish) | 90 days |
 | `signal_daily` | Daily aggregates (counts, score, source count) | 365 days |
 | `fundamentals` | Asset metadata (name, sector) refreshed daily | Replaced on refresh |
+| `technical_indicators` | Per-ticker technical indicators (RSI, EMA, SMA, MACD, ATR, Bollinger Bands, streak counts) computed from daily bars every research tick | Replaced per-symbol on each calculation |
 | `corporate_events` | Earnings reports, SEC filings | Permanent |
 | `sector_signals` | Sector-level and macro signals | 90 days |
 | `macro_events` | Macroeconomic calendar events | 30 days forward |

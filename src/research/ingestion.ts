@@ -14,6 +14,8 @@ import { fetchAllNews } from "../ingestion/expanded-news.js";
 import { fetchEdgarFilings, scoreFiling } from "../ingestion/edgar.js";
 import { scanRedditMentions } from "../ingestion/social.js";
 import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks, clearPriceCache } from "../ingestion/scanner.js";
+import { getDailyBars } from "../execution/alpaca.js";
+import { computeIndicators, generateTechnicalSignals } from "../analysis/technicals.js";
 import { getActiveWatchlist } from "../ingestion/discovery.js";
 import { refreshFundamentals } from "./fundamentals.js";
 import { ingestMacroAndSector } from "./macro.js";
@@ -98,6 +100,7 @@ const _sourceHealth: Record<string, SourceHealth> = {
   range_break: { name: "Range Breaks", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   macro_sector: { name: "Macro/Sector", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   fundamentals: { name: "Fundamentals", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  technicals: { name: "Technical Scans", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
 };
 
 function recordSourceSuccess(source: string): void {
@@ -395,6 +398,56 @@ async function ingestRangeBreaks(store: SignalStore): Promise<void> {
   }
 }
 
+/**
+ * Wire technical indicator scans.
+ * Fetches daily bars for the scan tickers, computes indicators (RSI, EMA, etc.),
+ * stores them in the technical_indicators table, and records signals for
+ * interesting setups (oversold/overbought, crossovers, streaks).
+ */
+async function ingestTechnicalScans(store: SignalStore): Promise<void> {
+  try {
+    const tickers = getScanTickers();
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    // Process in small batches to avoid rate limits
+    const batchSize = 5;
+    for (let i = 0; i < tickers.length; i += batchSize) {
+      const batch = tickers.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async (symbol) => {
+          const bars = await getDailyBars(symbol, 60);
+          if (bars.length < 10) return; // Need enough data
+
+          const indicators = computeIndicators(symbol, bars);
+
+          // Store indicators in the research DB
+          store.upsertTechnicalIndicators(symbol, indicators as unknown as Record<string, unknown>);
+
+          // Generate signals from the indicators
+          const techSignals = generateTechnicalSignals(indicators);
+          for (const sig of techSignals) {
+            signals.push({
+              ticker: sig.ticker,
+              source: "technicals",
+              score: sig.score,
+              direction: sig.direction,
+              payload: { signalType: sig.signalType, ...sig.payload },
+            });
+          }
+        })
+      );
+      // Small delay between batches
+      if (i + batchSize < tickers.length) await new Promise(r => setTimeout(r, 200));
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+  } catch (e: any) {
+    console.warn("[RESEARCH] Technical scan ingest failed:", e.message);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // RESEARCH TIMER — Runs on its own schedule, independent of trading hours/agent
 // ═══════════════════════════════════════════════════════════════════════════
@@ -456,6 +509,9 @@ async function researchTick(): Promise<void> {
   await trackedIngest("volume_spike", ingestVolumeScans)(store);
   await trackedIngest("gap", ingestPreMarketGaps)(store);
   await trackedIngest("range_break", ingestRangeBreaks)(store);
+
+  // Technical indicator scans use daily bars (not cached price), run after price scanners
+  await trackedIngest("technicals", ingestTechnicalScans)(store);
 
   // Log health summary every 10 cycles
   if (_cycleCount % 10 === 0) {
