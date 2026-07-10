@@ -28,6 +28,8 @@ import { runDailyRetrospective, shouldRunRetrospective } from "./retrospective/r
 import { checkExitConditions } from "./risk/guardrails.js";
 import { initResearch, stopResearch } from "./research/index.js";
 import type { MarketState } from "./types.js";
+import { join } from "path";
+import { readFileSync } from "fs";
 
 // ─── MAIN ────────────────────────────────────────────────────────────────────
 
@@ -541,6 +543,24 @@ async function buildPerceptionPrompt(
     lines.push(ctxNotes);
   }
 
+  // ── STRATEGIST REPORT INJECTION ──────────────────────────────────────
+  // The strategist writes a markdown report after each session.
+  // Inject it as a "Strategist's Briefing" section — it provides the narrative
+  // context behind the candidate strategies, market summary, and strategy overview.
+  //
+  // Focus: the trader should check current positions first, then use this briefing
+  // to decide whether to enter new positions.
+  const reportPath = join(process.cwd(), "data", "strategist-report.md");
+  let strategistReport = "";
+  try {
+    const reportContent = readFileSync(reportPath, "utf-8");
+    if (reportContent.trim()) {
+      strategistReport = reportContent.trim();
+    }
+  } catch {
+    // Report doesn't exist yet (first cycle before strategist runs) — skip
+  }
+
   // ── STRATEGY INJECTION — Top 10 candidates with full ticker context ──
   const strategyStore = new StrategyStore("data/strategies.db");
   const topStrategies = strategyStore.getTopStrategies(10);
@@ -601,7 +621,21 @@ async function buildPerceptionPrompt(
     }
   } else {
     lines.push("");
-    lines.push("═══ NO CANDIDATE STRATEGIES — strategist hasn't identified any setups yet ═══");
+    lines.push("═══ NO CANDIDATE STRATEGIES — strategist hasn\'t identified any setups yet ═══");
+  }
+
+  // ── STRATEGIST REPORT ─────────────────────────────────────────────────────
+  if (strategistReport) {
+    lines.push("");
+    lines.push("═══ STRATEGIST\'S BRIEFING ═══");
+    lines.push("The strategist\'s latest report provides narrative context for the market and strategies.");
+    lines.push("Read it for the strategist\'s reasoning and commentary, then use the structured data");
+    lines.push("above (current positions + candidate strategies) to make execution decisions.");
+    lines.push("");
+    lines.push("```");
+    lines.push(strategistReport);
+    lines.push("```");
+    lines.push("");
   }
 
   // ── PRE-DIGESTED CONTEXT ─────────────────────────────────────────────────
@@ -635,20 +669,23 @@ async function buildPerceptionPrompt(
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
   lines.push("");
   lines.push("INSTRUCTION:");
-  lines.push("1. Review positions first — check if each position's linked strategy still holds.");
-  lines.push("2. Review the TOP CANDIDATE STRATEGIES above — these are pre-vetted by the strategist.");
-  lines.push("3. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
-  lines.push("4. For mechanical exits: monitor_positions → place_sell_order → update_strategy_on_exit.");
-  lines.push("5. **BEFORE any trade**, call consult_memory to check lessons and similar past trades.");
-  lines.push("6. Each candidate strategy now includes a HISTORICAL GRADE (1-5) + hypothetical P&L from prior days.");
+  lines.push("1. Review positions first — check if each position\'s linked strategy still holds.");
+  lines.push("2. Read the STRATEGIST\'S BRIEFING (above) for narrative context, market summary, and the strategist\'s reasoning.");
+  lines.push("   The briefing explains WHY each strategy is at its rank and provides market commentary.");
+  lines.push("3. Then review the TOP CANDIDATE STRATEGIES — these are pre-vetted by the strategist.");
+  lines.push("   Cross-reference the strategist\'s reasoning with the structured data + price context below.");
+  lines.push("4. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
+  lines.push("5. For mechanical exits: monitor_positions → place_sell_order → update_strategy_on_exit.");
+  lines.push("6. **BEFORE any trade**, call consult_memory to check lessons and similar past trades.");
+  lines.push("7. Each candidate strategy includes a HISTORICAL GRADE (1-5) + hypothetical P&L from prior days.");
   lines.push("   - Grade 4-5 = setup has worked before in similar conditions. Stronger conviction.");
   lines.push("   - Grade 1-2 = setup has failed before. Approach with caution or skip.");
   lines.push("   - Grade 3 or 'No prior grade' = neutral or new. Rely on thesis + price action.");
   lines.push("   - Use the ABSTRACTION PATTERN to assess regime fit: `momentum long trending_up works catalyst:news`.");
-  lines.push("7. If a candidate strategy has a strong thesis + confirming price action + good historical grade → place_buy_order or place_short_order.");
-  lines.push("8. If nothing passes your bar → hold_cash (explain why).");
-  lines.push("9. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
-  lines.push("10. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
+  lines.push("8. If a candidate strategy has a strong thesis + confirming price action + good historical grade → place_buy_order or place_short_order.");
+  lines.push("9. If nothing passes your bar → hold_cash (explain why).");
+  lines.push("10. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
+  lines.push("11. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
 
   return lines.join("\n");
 }
