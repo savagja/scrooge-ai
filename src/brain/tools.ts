@@ -1851,14 +1851,9 @@ export const updateStrategyOnExitTool = defineTool({
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const allTradingTools = [
-  // Market context (keep minimal)
-  fetchMarketDataTool,
-  fetchNewsTool,
   // Portfolio & execution
   checkPortfolioTool,
   monitorPositionsTool,
-  tradeNewsMomentumTool,
-  tradeMeanReversionTool,
   placeBuyOrderTool,
   placeShortOrderTool,
   placeSellOrderTool,
@@ -1872,10 +1867,6 @@ export const allTradingTools = [
   noteContextTool,
   viewContextTool,
   pruneContextTool,
-  // Research engine (keep for quick checks)
-  searchSignalsTool,
-  describeDatasetsTool,
-  // Strategy-aware tools
-  getActiveStrategiesTool,
+  // Strategy feedback (report outcomes back to strategist)
   updateStrategyOnExitTool,
 ];

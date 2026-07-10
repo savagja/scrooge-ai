@@ -655,25 +655,34 @@ async function buildPerceptionPrompt(
 
   lines.push("");
   lines.push("═══ AVAILABLE TOOLS ═══");
-  lines.push("The strategist handles research. You execute:");
-  lines.push("  • get_active_strategies — see all strategies from the strategist");
-  lines.push("  • update_strategy_on_exit — record outcome when you close a position");
-  lines.push("  • search_signals — quick research DB check (use sparingly)");
-  lines.push("  • describe_datasets — see what data is in the research DB");
-  lines.push("  • fetch_news — quick headline check for a specific ticker");
-  lines.push("  • consult_memory — check lessons and similar past trades BEFORE any trade");
+  lines.push("The strategist handles ALL research. You manage positions only.");
+  lines.push("All candidate strategies are provided directly in your prompt above —");
+  lines.push("there is NO tool to re-fetch or research strategies on your own.");
+  lines.push("Learn more from the strategist\'s report (above) and your own memory.");
+  lines.push("");
+  lines.push("Your execution tools:");
+  lines.push("  • check_portfolio — view cash, P&L, open positions");
   lines.push("  • monitor_positions — check all open positions' exit conditions");
+  lines.push("  • place_buy_order, place_short_order — enter positions");
+  lines.push("  • place_sell_order — exit a position");
   lines.push("  • close_position — evaluate if a position's thesis still holds");
+  lines.push("  • update_strategy_on_exit — record outcome when you close a position");
+  lines.push("  • hold_cash — explicitly choose not to trade");
+  lines.push("  • consult_memory — check lessons and similar past trades BEFORE any trade");
+  lines.push("  • record_decision — log your reasoning");
+  lines.push("  • reflect_on_performance — end-of-session retrospective");
+  lines.push("  • emergency_close_all — shut everything down (risk emergency only)");
   lines.push("");
   lines.push("⚠️  IMPORTANT: The market is CURRENTLY OPEN. Alpaca clock confirms this.");
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
   lines.push("");
   lines.push("INSTRUCTION:");
   lines.push("1. Review positions first — check if each position\'s linked strategy still holds.");
+  lines.push("   The strategist already built the thesis. Your job: manage the position.");
   lines.push("2. Read the STRATEGIST\'S BRIEFING (above) for narrative context, market summary, and the strategist\'s reasoning.");
   lines.push("   The briefing explains WHY each strategy is at its rank and provides market commentary.");
-  lines.push("3. Then review the TOP CANDIDATE STRATEGIES — these are pre-vetted by the strategist.");
-  lines.push("   Cross-reference the strategist\'s reasoning with the structured data + price context below.");
+  lines.push("3. Then review the TOP CANDIDATE STRATEGIES above — these are pre-vetted by the strategist.");
+  lines.push("   Cross-reference the strategist\'s reasoning with the structured data + price context provided.");
   lines.push("4. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
   lines.push("5. For mechanical exits: monitor_positions → place_sell_order → update_strategy_on_exit.");
   lines.push("6. **BEFORE any trade**, call consult_memory to check lessons and similar past trades.");
@@ -686,6 +695,14 @@ async function buildPerceptionPrompt(
   lines.push("9. If nothing passes your bar → hold_cash (explain why).");
   lines.push("10. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
   lines.push("11. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
+  lines.push("");
+  lines.push("⚠️  IMPORTANT RESTRICTIONS:");
+  lines.push("    • You have NO research tools. Do NOT try to analyze tickers beyond what is provided.");
+  lines.push("    • You have NO tool to fetch additional strategies. Use what is in this prompt.");
+  lines.push("    • Do NOT attempt to evaluate tickers not listed in CANDIDATE STRATEGIES or POSITIONS.");
+  lines.push("    • If the strategist's briefing mentions interesting tickers not in the structured list,");
+  lines.push("      ignore them — they weren't ranked highly enough to be included.");
+  lines.push("    • You are an execution specialist, not a researcher. Stick to the data provided.");
 
   return lines.join("\n");
 }
