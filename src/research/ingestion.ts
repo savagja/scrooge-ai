@@ -13,7 +13,7 @@ import { scanYahooMarketMovers } from "../ingestion/discovery.js";
 import { fetchAllNews } from "../ingestion/expanded-news.js";
 import { fetchEdgarFilings, scoreFiling } from "../ingestion/edgar.js";
 import { scanRedditMentions } from "../ingestion/social.js";
-import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks } from "../ingestion/scanner.js";
+import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks, clearPriceCache } from "../ingestion/scanner.js";
 import { getActiveWatchlist } from "../ingestion/discovery.js";
 import { refreshFundamentals } from "./fundamentals.js";
 import { ingestMacroAndSector } from "./macro.js";
@@ -439,6 +439,9 @@ function trackedIngest(source: string, fn: (store: SignalStore) => Promise<void>
 async function researchTick(): Promise<void> {
   const store = getSignalStore();
   _cycleCount++;
+
+  // Clear shared price cache so scanners get fresh data
+  clearPriceCache();
 
   // Fire all data sources in parallel — each has individual error handling AND health tracking
   await Promise.allSettled([

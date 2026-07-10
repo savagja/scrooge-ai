@@ -17,6 +17,32 @@ import { getCurrentPrice, getLatestQuote } from "../execution/alpaca.js";
 
 const ALPACA_DATA_URL = "https://data.alpaca.markets";
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED PRICE CACHE — All scanners share the same cache within a research tick
+// Prevents redundant API calls and reduces rate limit pressure.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const _priceCache = new Map<string, number>();
+
+/**
+ * Get price with cycle-level caching. All scanners in the same research tick
+ * share this cache, reducing API calls from ~320 to ~40 per cycle.
+ */
+async function getCachedPrice(symbol: string): Promise<number | null> {
+  const cached = _priceCache.get(symbol);
+  if (cached !== undefined) return cached;
+  const price = await getCurrentPrice(symbol);
+  if (price !== null) _priceCache.set(symbol, price);
+  return price;
+}
+
+/**
+ * Clear the shared price cache. Call at the start of each research tick.
+ */
+export function clearPriceCache(): void {
+  _priceCache.clear();
+}
+
 function getHeaders() {
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_SECRET_KEY;
@@ -161,7 +187,7 @@ export async function scanRelativeVolume(
     const batchResults = await Promise.allSettled(
       batch.map(async (symbol) => {
         const [price, avgVol, todayVol] = await Promise.all([
-          getCurrentPrice(symbol),
+          getCachedPrice(symbol),
           getAverageVolume(symbol, 20),
           getTodayVolume(symbol),
         ]);
@@ -214,7 +240,7 @@ export async function scanPreMarketGaps(
     const batchResults = await Promise.allSettled(
       batch.map(async (symbol) => {
         const [price, priorClose] = await Promise.all([
-          getCurrentPrice(symbol),
+          getCachedPrice(symbol),
           getPriorClose(symbol),
         ]);
 
@@ -266,7 +292,7 @@ export async function scanRangeBreaks(
         const high20d = Math.max(...prices);
         const low20d = Math.min(...prices);
 
-        const price = await getCurrentPrice(symbol);
+        const price = await getCachedPrice(symbol);
         if (!price) return null;
 
         const range = high20d - low20d;
