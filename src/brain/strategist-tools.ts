@@ -162,6 +162,146 @@ export const consultMemoryTool = defineTool({
   },
 });
 
+// ── Strategist-only: technical indicator tools ───────────────────────────
+
+const _storeForTech = getSignalStore;
+
+/**
+ * Query technical indicators for tickers matching specific setups.
+ * The strategist can filter by RSI extremes, Bollinger Band breaks,
+ * EMA alignment, consecutive candle streaks, and SMA position.
+ * Returns the latest indicators per symbol.
+ */
+export const queryTechnicalIndicatorsTool = defineTool({
+  name: "query_technical_indicators",
+  label: "Query Technical Indicators",
+  description:
+    "Query the latest technical indicators for tickers matching specific setups. " +
+    "Filters: minRsi/maxRsi (oversold <30, overbought >70), " +
+    "minConsecutiveUp/minConsecutiveDown (streak length), " +
+    "aboveBollingerUpper/belowBollingerLower (Bollinger Band breaks), " +
+    "emaBullishAlignment/emaBearishAlignment (EMA 8/21/50 alignment), " +
+    "aboveSma50/belowSma50 (price vs SMA-50). " +
+    "Returns: symbol, RSI, EMA 8/21/50, SMA 20/50/200, Bollinger %B, ATR, streak counts, timestamp.",
+  parameters: Type.Object({
+    minRsi: Type.Optional(NumStr),
+    maxRsi: Type.Optional(NumStr),
+    minConsecutiveUp: Type.Optional(NumStr),
+    minConsecutiveDown: Type.Optional(NumStr),
+    aboveBollingerUpper: Type.Optional(Type.Boolean()),
+    belowBollingerLower: Type.Optional(Type.Boolean()),
+    emaBullishAlignment: Type.Optional(Type.Boolean()),
+    emaBearishAlignment: Type.Optional(Type.Boolean()),
+    aboveSma50: Type.Optional(Type.Boolean()),
+    belowSma50: Type.Optional(Type.Boolean()),
+    limit: Type.Optional(NumStr),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const store = _storeForTech();
+      if (!store) return text("Research DB not available.");
+
+      const results = store.queryTechnicalIndicators({
+        minRsi: params.minRsi !== undefined ? coerceNumber(params.minRsi, 0) : undefined,
+        maxRsi: params.maxRsi !== undefined ? coerceNumber(params.maxRsi, 100) : undefined,
+        minConsecutiveUp: params.minConsecutiveUp !== undefined ? coerceNumber(params.minConsecutiveUp, 0) : undefined,
+        minConsecutiveDown: params.minConsecutiveDown !== undefined ? coerceNumber(params.minConsecutiveDown, 0) : undefined,
+        aboveBollingerUpper: params.aboveBollingerUpper,
+        belowBollingerLower: params.belowBollingerLower,
+        emaBullishAlignment: params.emaBullishAlignment,
+        emaBearishAlignment: params.emaBearishAlignment,
+        aboveSma50: params.aboveSma50,
+        belowSma50: params.belowSma50,
+        limit: params.limit !== undefined ? coerceNumber(params.limit, 50) : 50,
+      });
+
+      if (!results || results.length === 0) {
+        return text("No tickers match the specified technical criteria.");
+      }
+
+      const lines = [
+        `=== TECHNICAL INDICATORS (${results.length} tickers) ===`,
+        "",
+      ];
+
+      for (const r of results) {
+        const rsi = r.rsi_14 !== null ? Number(r.rsi_14).toFixed(1) : "N/A";
+        const bb = r.bollinger_band_pct !== null ? Number(r.bollinger_band_pct).toFixed(2) : "N/A";
+        const emaAlign = Number(r.ema_8_above_ema_21) && Number(r.ema_21_above_ema_50) ? "↑↑" : !Number(r.ema_8_above_ema_21) && !Number(r.ema_21_above_ema_50) ? "↓↓" : "→";
+        const streak = Number(r.consecutive_up) > 0 ? `${r.consecutive_up}↑` : Number(r.consecutive_down) > 0 ? `${r.consecutive_down}↓` : "0";
+
+        lines.push(`  ${String(r.symbol)}`);
+        lines.push(`    RSI: ${rsi} | Bollinger %B: ${bb} | Streak: ${streak} | EMA: ${emaAlign}`);
+        lines.push(`    SMA-50: ${r.sma_50 !== null ? Number(r.sma_50).toFixed(2) : "N/A"} ${Number(r.close_above_sma_50) ? "(above)" : "(below)"}`);
+        lines.push(`    Date: ${r.timestamp}`);
+        lines.push("");
+      }
+
+      return text(lines.join("\n"));
+    } catch (e: any) {
+      return text("Error querying technical indicators: " + e.message);
+    }
+  },
+});
+
+/**
+ * Get the latest technical indicators for a single ticker.
+ * Simpler than query_technical_indicators — just returns the latest values.
+ */
+export const getTickerTechnicalsTool = defineTool({
+  name: "get_ticker_technicals",
+  label: "Get Ticker Technicals",
+  description:
+    "Get the latest technical indicators for a single ticker. " +
+    "Returns: RSI(14), EMA(8/21/50), SMA(20/50/200), MACD, ATR(14), " +
+    "Bollinger Bands with %B, consecutive candle streak.",
+  parameters: Type.Object({
+    symbol: Type.String({ description: "Ticker symbol" }),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const store = _storeForTech();
+      if (!store) return text("Research DB not available.");
+
+      const result = store.getLatestTechnicalIndicators(params.symbol.toUpperCase());
+      if (!result) {
+        return text(`No technical indicators found for ${params.symbol.toUpperCase()}. The research engine may not have computed them yet (it runs every ~2 minutes).`);
+      }
+
+      const r = result;
+      const lines = [
+        `=== TECHNICAL INDICATORS: ${String(r.symbol)} ===`,
+        `Date: ${r.timestamp}`,
+        "",
+        `Momentum:`,
+        `  RSI(14): ${r.rsi_14 !== null ? Number(r.rsi_14).toFixed(1) : "N/A"}`,
+        `  MACD: ${r.macd_line !== null ? Number(r.macd_line).toFixed(4) : "N/A"} | Signal: ${r.macd_signal !== null ? Number(r.macd_signal).toFixed(4) : "N/A"} | Hist: ${r.macd_histogram !== null ? Number(r.macd_histogram).toFixed(4) : "N/A"}`,
+        "",
+        `Trend:`,
+        `  EMA(8): ${r.ema_8 !== null ? Number(r.ema_8).toFixed(2) : "N/A"}`,
+        `  EMA(21): ${r.ema_21 !== null ? Number(r.ema_21).toFixed(2) : "N/A"}`,
+        `  EMA(50): ${r.ema_50 !== null ? Number(r.ema_50).toFixed(2) : "N/A"}`,
+        `  SMA(20): ${r.sma_20 !== null ? Number(r.sma_20).toFixed(2) : "N/A"}`,
+        `  SMA(50): ${r.sma_50 !== null ? Number(r.sma_50).toFixed(2) : "N/A"}`,
+        `  SMA(200): ${r.sma_200 !== null ? Number(r.sma_200).toFixed(2) : "N/A"}`,
+        `  EMA Alignment: ${Number(r.ema_8_above_ema_21) && Number(r.ema_21_above_ema_50) ? "Bullish (8>21>50)" : !Number(r.ema_8_above_ema_21) && !Number(r.ema_21_above_ema_50) ? "Bearish (8<21<50)" : "Mixed"}`,
+        `  Price vs SMA-50: ${Number(r.close_above_sma_50) ? "Above" : "Below"}`,
+        "",
+        `Volatility:`,
+        `  ATR(14): ${r.atr_14 !== null ? Number(r.atr_14).toFixed(4) : "N/A"}`,
+        `  Bollinger %B: ${r.bollinger_band_pct !== null ? Number(r.bollinger_band_pct).toFixed(2) : "N/A"}`,
+        "",
+        `Structure:`,
+        `  Consecutive candles: ${Number(r.consecutive_up) > 0 ? `${r.consecutive_up} green` : Number(r.consecutive_down) > 0 ? `${r.consecutive_down} red` : "0"}`,
+      ];
+
+      return text(lines.join("\n"));
+    } catch (e: any) {
+      return text("Error fetching technicals: " + e.message);
+    }
+  },
+});
+
 // ── Strategist-only: sector / macro tools ─────────────────────────────────
 
 import { getSignalStore } from "../research/index.js";
@@ -318,5 +458,6 @@ export const allStrategistTools = [
   scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
   scanRedditTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
   searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool, listStrategiesTool,
+  queryTechnicalIndicatorsTool, getTickerTechnicalsTool,
   createStrategyTool, updateStrategyTool, archiveStrategyTool,
 ];
