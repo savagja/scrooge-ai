@@ -14,11 +14,175 @@ config();
 
 import { getConfig, reloadConfig } from "./src/config.js";
 import { createStrategistBrain } from "./src/brain/strategist-agent.js";
-import { setStrategistState, getWatchlist } from "./src/brain/strategist-tools.js";
+import { setStrategistState } from "./src/brain/strategist-tools.js";
 import { PortfolioState } from "./src/state/portfolio.js";
 import { StrategyStore } from "./src/state/strategies.js";
 import { getClock } from "./src/execution/alpaca.js";
-import { initResearch, stopResearch } from "./src/research/index.js";
+import { initResearch, stopResearch, getSignalStore } from "./src/research/index.js";
+import { getVix, getSpyChange } from "./src/ingestion/market.js";
+import { writeFileSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
+
+const REPORT_PATH = join(process.cwd(), "data", "strategist-report.md");
+
+/**
+ * Generate a structured markdown report for the trader.
+ * Written to data/strategist-report.md after each strategist session.
+ * The report includes:
+ *   - Market summary (regime, VIX, breadth) from the research DB
+ *   - Top strategies ranked by confidence × conviction × state
+ *   - Explanation of why each strategy is at the top
+ *   - Strategy state distribution (overview of all strategies)
+ *   - Key signals / themes the strategist is tracking
+ */
+async function generateStrategistReport(
+  strategies: StrategyStore,
+  sessionType: "pre-market" | "mid-session",
+  clock: { isOpen: boolean; nextOpen: string; nextClose: string; timestamp: string },
+  strategistOutput: string
+): Promise<string> {
+  const now = new Date().toISOString();
+  const lines: string[] = [];
+
+  // ── Header ─────────────────────────────────────────────────────────────
+  lines.push("# 🧠 Strategist Report");
+  lines.push("");
+  lines.push(`**Generated:** ${now}`);
+  lines.push(`**Session:** ${sessionType === "pre-market" ? "Pre-Market" : "Mid-Session"}`);
+  lines.push(`**Market:** ${clock.isOpen ? "OPEN" : "CLOSED"}`);
+  if (clock.isOpen) {
+    lines.push(`**Closes:** ${clock.nextClose}`);
+  } else {
+    lines.push(`**Opens:** ${clock.nextOpen}`);
+  }
+  lines.push("");
+
+  // ── Market Summary ─────────────────────────────────────────────────────
+  lines.push("## 📊 Market Summary");
+  lines.push("");
+  lines.push("| Measure | Value |");
+  lines.push("|---------|-------|");
+
+  // Get VIX and SPY from market data functions
+  let vix: string = "unknown";
+  let spyChange: string = "unknown";
+  let regime: string = "unknown";
+  try {
+    const vixVal = await getVix();
+    if (vixVal !== null) vix = vixVal.toFixed(2);
+    const spyVal = await getSpyChange();
+    if (spyVal !== null) spyChange = spyVal.toFixed(2);
+    // Infer regime from VIX (simple heuristic for the report)
+    const vixNum = parseFloat(vix);
+    if (!isNaN(vixNum)) {
+      if (vixNum < 14) regime = "trending_up (low volatility)";
+      else if (vixNum < 20) regime = "normal";
+      else if (vixNum < 30) regime = "elevated (cautious)";
+      else regime = "high volatility (defensive)";
+    }
+  } catch { /* fall through with defaults */ }
+
+  lines.push(`| VIX | ${vix} |`);
+  lines.push(`| SPY Change | ${spyChange}% |`);
+  lines.push(`| Market Regime | ${regime} |`);
+  lines.push("");
+
+  // ── Strategy Overview ──────────────────────────────────────────────────
+  lines.push("## 📋 Strategy Overview");
+  lines.push("");
+  const counts = strategies.getStateCounts();
+  const total = strategies.getTotalCount();
+  lines.push(`**Total strategies:** ${total}`);
+  lines.push("");
+  lines.push("| State | Count |");
+  lines.push("|-------|-------|");
+  if (counts.anticipated) lines.push(`| Anticipated | ${counts.anticipated} |`);
+  if (counts.developing) lines.push(`| Developing | ${counts.developing} |`);
+  if (counts.active) lines.push(`| Active (in position) | ${counts.active} |`);
+  if (counts.realized) lines.push(`| Realized | ${counts.realized} |`);
+  if (counts.failed) lines.push(`| Failed | ${counts.failed} |`);
+  if (counts.stale) lines.push(`| Stale | ${counts.stale} |`);
+  lines.push("");
+
+  // ── Top Strategies ─────────────────────────────────────────────────────
+  const top = strategies.getTopStrategies(20); // grab extra for selection
+  const topDisplay = top.slice(0, 10); // show at most 10
+
+  lines.push("## 🏆 Top Strategies for Trader");
+  lines.push("");
+
+  if (topDisplay.length === 0) {
+    lines.push("No strategies ready for execution yet. The strategist is still analyzing the market.");
+    lines.push("");
+  } else {
+    // Explain the ranking
+    lines.push("Strategies are ranked by: developing > anticipated, then high > medium > low conviction, then confidence score, then most recently updated.");
+    lines.push("A strategy in `developing` state has 2+ converging signals. `anticipated` means a single interesting sighting.");
+    lines.push("");
+
+    for (let i = 0; i < topDisplay.length; i++) {
+      const s = topDisplay[i];
+      const rank = i + 1;
+
+      // Build why-this-is-at-top explanation
+      const reasons: string[] = [];
+      if (s.state === "developing") reasons.push("Multiple converging signals");
+      if (s.conviction === "high") reasons.push("High conviction");
+      if (s.confidence >= 0.5) reasons.push(`Confidence ${(s.confidence * 100).toFixed(0)}%`);
+      if (rank === 1) reasons.push("Top-ranked by conviction × confidence");
+
+      lines.push(`### ${rank}. ${s.ticker} — ${s.direction?.toUpperCase() ?? "?"} ${s.strategy_type}`);
+      lines.push("");
+      lines.push(`**State:** ${s.state} | **Conviction:** ${s.conviction} | **Confidence:** ${(s.confidence * 100).toFixed(0)}%`);
+      lines.push("");
+      lines.push(`**Thesis:** ${s.thesis}`);
+      if (s.catalyst) lines.push(`**Catalyst:** ${s.catalyst}`);
+      if (s.timeframe) lines.push(`**Timeframe:** ${s.timeframe}`);
+      if (s.rationale) lines.push(`**Rationale:** ${s.rationale.slice(0, 300)}`);
+      if (s.key_signals && (s.key_signals as string[]).length > 0)
+        lines.push(`**Key Signals:** ${(s.key_signals as string[]).join(", ")}`);
+      if (s.entry_conditions) lines.push(`**Entry Conditions:** ${s.entry_conditions}`);
+      if (s.exit_conditions) lines.push(`**Exit Conditions:** ${s.exit_conditions}`);
+      lines.push("");
+
+      // What-If historical grade
+      if (s.what_if) {
+        const emoji = s.what_if.grade >= 4 ? "✅" : s.what_if.grade <= 2 ? "❌" : "➖";
+        const pnlStr = s.what_if.potentialGainLoss >= 0
+          ? `+$${s.what_if.potentialGainLoss.toFixed(2)}`
+          : `-$${Math.abs(s.what_if.potentialGainLoss).toFixed(2)}`;
+        lines.push(`**Historical Grade:** ${emoji} ${s.what_if.grade}/5 — ${pnlStr} (${s.what_if.potentialGainLossPct >= 0 ? "+" : ""}${s.what_if.potentialGainLossPct.toFixed(1)}%) | ${s.what_if.abstraction}`);
+        lines.push("");
+      } else {
+        lines.push("**Historical Grade:** No prior trades — new setup.");
+        lines.push("");
+      }
+
+      // Why this rank
+      lines.push(`**Why #${rank}:** ${reasons.join(". ")}.`);
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+    }
+  }
+
+  // ── Strategist Commentary ──────────────────────────────────────────────
+  if (strategistOutput.trim()) {
+    lines.push("## 💬 Strategist Analysis");
+    lines.push("");
+    lines.push("```");
+    lines.push(strategistOutput.trim());
+    lines.push("```");
+    lines.push("");
+  }
+
+  // ── Footer ─────────────────────────────────────────────────────────────
+  lines.push("---");
+  lines.push(`_Report auto-generated by Scrooge Strategist at ${now}_`);
+  lines.push("");
+
+  return lines.join("\n");
+}
 
 async function main() {
   const cfg = getConfig();
@@ -35,7 +199,7 @@ async function main() {
 
   // Initialize portfolio state (for reading positions/memory only)
   const state = new PortfolioState(cfg.initialCapital);
-  setStrategistState(state, strategies, cfg.watchlist);
+  setStrategistState(state, strategies);
 
   // Start research engine if configured
   if (cfg.research?.enabled) {
@@ -238,6 +402,22 @@ async function runStrategistSession(
     }
 
     session.dispose();
+
+    // Generate strategist report for the trader
+    try {
+      const report = await generateStrategistReport(
+        strategies,
+        sessionType,
+        clock,
+        output
+      );
+      mkdirSync(dirname(REPORT_PATH), { recursive: true });
+      writeFileSync(REPORT_PATH, report, "utf-8");
+      const lineCount = report.split("\n").length;
+      console.log(`  Report written to ${REPORT_PATH} (${lineCount} lines)`);
+    } catch (e: any) {
+      console.warn("  Failed to generate strategist report:", e.message);
+    }
   } catch (e: any) {
     console.error("  Strategist session failed: " + e.message);
   }
