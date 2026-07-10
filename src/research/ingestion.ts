@@ -41,7 +41,7 @@ let _cycleCount = 0;
 // Core seed tickers provide baseline coverage so we never go "blind".
 // ═══════════════════════════════════════════════════════════════════════════
 
-const MAX_SCAN_TICKERS = 100;
+const MAX_SCAN_TICKERS = 40; // Keep under Alpaca free tier rate limits (~200 req/min)
 
 /**
  * Build the dynamic ticker set for per-ticker scans.

@@ -154,33 +154,45 @@ export async function scanRelativeVolume(
 ): Promise<VolumeScan[]> {
   const results: VolumeScan[] = [];
 
-  for (const symbol of watchlist) {
-    const [price, avgVol, todayVol] = await Promise.all([
-      getCurrentPrice(symbol),
-      getAverageVolume(symbol, 20),
-      getTodayVolume(symbol),
-    ]);
+  // Concurrency limit to avoid Alpaca rate limits
+  const batchSize = 5;
+  for (let i = 0; i < watchlist.length; i += batchSize) {
+    const batch = watchlist.slice(i, i + batchSize);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (symbol) => {
+        const [price, avgVol, todayVol] = await Promise.all([
+          getCurrentPrice(symbol),
+          getAverageVolume(symbol, 20),
+          getTodayVolume(symbol),
+        ]);
 
-    if (!price || !avgVol || !todayVol) continue;
+        if (!price || !avgVol) return null;
 
-    const relativeVolume = avgVol > 0 ? todayVol / avgVol : 0;
-    const priorClose = await getPriorClose(symbol);
-    const changePct = priorClose ? ((price - priorClose) / priorClose) * 100 : 0;
+        const relativeVolume = avgVol > 0 ? (todayVol || 0) / avgVol : 0;
+        const priorClose = await getPriorClose(symbol);
+        const changePct = priorClose ? ((price - priorClose) / priorClose) * 100 : 0;
 
-    let regime: VolumeScan["regime"] = "quiet";
-    if (relativeVolume >= 5) regime = "blowout";
-    else if (relativeVolume >= 3) regime = "surge";
-    else if (relativeVolume >= 1.5) regime = "active";
+        let regime: VolumeScan["regime"] = "quiet";
+        if (relativeVolume >= 5) regime = "blowout";
+        else if (relativeVolume >= 3) regime = "surge";
+        else if (relativeVolume >= 1.5) regime = "active";
 
-    results.push({
-      symbol,
-      currentPrice: price,
-      changePct: Math.round(changePct * 100) / 100,
-      avgVolume20d: Math.round(avgVol),
-      todayVolume: Math.round(todayVol),
-      relativeVolume: Math.round(relativeVolume * 100) / 100,
-      regime,
-    });
+        return {
+          symbol,
+          currentPrice: price,
+          changePct: Math.round(changePct * 100) / 100,
+          avgVolume20d: Math.round(avgVol),
+          todayVolume: Math.round(todayVol || 0),
+          relativeVolume: Math.round(relativeVolume * 100) / 100,
+          regime,
+        } satisfies VolumeScan;
+      })
+    );
+    for (const r of batchResults) {
+      if (r.status === "fulfilled" && r.value) results.push(r.value);
+    }
+    // Small delay between batches to respect rate limits
+    if (i + batchSize < watchlist.length) await new Promise(r => setTimeout(r, 100));
   }
 
   // Sort by relative volume descending
@@ -196,26 +208,36 @@ export async function scanPreMarketGaps(
 ): Promise<GapScan[]> {
   const results: GapScan[] = [];
 
-  for (const symbol of watchlist) {
-    const [price, priorClose] = await Promise.all([
-      getCurrentPrice(symbol),
-      getPriorClose(symbol),
-    ]);
+  const batchSize = 5;
+  for (let i = 0; i < watchlist.length; i += batchSize) {
+    const batch = watchlist.slice(i, i + batchSize);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (symbol) => {
+        const [price, priorClose] = await Promise.all([
+          getCurrentPrice(symbol),
+          getPriorClose(symbol),
+        ]);
 
-    if (!price || !priorClose) continue;
+        if (!price || !priorClose) return null;
 
-    const gapPct = ((price - priorClose) / priorClose) * 100;
+        const gapPct = ((price - priorClose) / priorClose) * 100;
 
-    // Only report significant gaps
-    if (Math.abs(gapPct) < 1.5) continue;
+        // Only report significant gaps
+        if (Math.abs(gapPct) < 1.5) return null;
 
-    results.push({
-      symbol,
-      priorClose: Math.round(priorClose * 100) / 100,
-      preMarketPrice: Math.round(price * 100) / 100,
-      gapPct: Math.round(gapPct * 100) / 100,
-      hasNews: false, // will be populated by caller
-    });
+        return {
+          symbol,
+          priorClose: Math.round(priorClose * 100) / 100,
+          preMarketPrice: Math.round(price * 100) / 100,
+          gapPct: Math.round(gapPct * 100) / 100,
+          hasNews: false,
+        } satisfies GapScan;
+      })
+    );
+    for (const r of batchResults) {
+      if (r.status === "fulfilled" && r.value) results.push(r.value);
+    }
+    if (i + batchSize < watchlist.length) await new Promise(r => setTimeout(r, 100));
   }
 
   // Sort by gap magnitude descending
@@ -231,36 +253,41 @@ export async function scanRangeBreaks(
 ): Promise<Array<{ symbol: string; price: number; high20d: number; low20d: number; positionInRange: number }>> {
   const results: { symbol: string; price: number; high20d: number; low20d: number; positionInRange: number }[] = [];
 
-  for (const symbol of watchlist) {
-    try {
-      // Use historical bars (avoids paper account's recent SIP restriction)
-      const bars = await getHistoricalDailyBars(symbol, 25);
-      if (bars.length < 10) continue;
+  const batchSize = 5;
+  for (let i = 0; i < watchlist.length; i += batchSize) {
+    const batch = watchlist.slice(i, i + batchSize);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (symbol) => {
+        // Use historical bars (avoids paper account's recent SIP restriction)
+        const bars = await getHistoricalDailyBars(symbol, 25);
+        if (bars.length < 10) return null;
 
-      // Only use complete (past) bars — excludes any same-day data
-      const prices = bars.flatMap((b: any) => [b.h, b.l]);
-      const high20d = Math.max(...prices);
-      const low20d = Math.min(...prices);
+        const prices = bars.flatMap((b: any) => [b.h, b.l]);
+        const high20d = Math.max(...prices);
+        const low20d = Math.min(...prices);
 
-      const price = await getCurrentPrice(symbol);
-      if (!price) continue;
+        const price = await getCurrentPrice(symbol);
+        if (!price) return null;
 
-      const range = high20d - low20d;
-      const positionInRange = range > 0 ? ((price - low20d) / range) : 0.5;
+        const range = high20d - low20d;
+        const positionInRange = range > 0 ? ((price - low20d) / range) : 0.5;
 
-      // Only flag extremes (near top or bottom of range)
-      if (positionInRange > 0.9 || positionInRange < 0.1) {
-        results.push({
+        // Only flag extremes (near top or bottom of range)
+        if (positionInRange <= 0.9 && positionInRange >= 0.1) return null;
+
+        return {
           symbol,
           price: Math.round(price * 100) / 100,
           high20d: Math.round(high20d * 100) / 100,
           low20d: Math.round(low20d * 100) / 100,
           positionInRange: Math.round(positionInRange * 100) / 100,
-        });
-      }
-    } catch {
-      continue;
+        };
+      })
+    );
+    for (const r of batchResults) {
+      if (r.status === "fulfilled" && r.value) results.push(r.value);
     }
+    if (i + batchSize < watchlist.length) await new Promise(r => setTimeout(r, 100));
   }
 
   return results.sort((a, b) => Math.abs(0.5 - b.positionInRange) - Math.abs(0.5 - a.positionInRange));
