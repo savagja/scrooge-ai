@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "fs";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
-import type { Strategy, StrategyType, StrategyState, WhatIfEntry, WhatIfGrade } from "../types.js";
+import type { Strategy, StrategyType, StrategyState, WhatIfEntry, WhatIfGrade, Lesson } from "../types.js";
 
 const DATA_DIR = join(process.cwd(), "data");
 
@@ -129,6 +129,26 @@ export class StrategyStore {
         run: () => {
           try { this.db.exec("ALTER TABLE strategies ADD COLUMN what_if TEXT"); }
           catch { /* column already exists */ }
+        },
+      },
+      {
+        version: 6,
+        label: "Add strategist_lessons table",
+        run: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS strategist_lessons (
+              id                TEXT PRIMARY KEY,
+              category          TEXT NOT NULL,
+              insight           TEXT NOT NULL,
+              weight            REAL NOT NULL DEFAULT 0.3,
+              reinforcementCount INTEGER NOT NULL DEFAULT 1,
+              createdAt         TEXT NOT NULL,
+              lastReinforcedAt  TEXT NOT NULL,
+              deprecated        INTEGER NOT NULL DEFAULT 0,
+              context           TEXT,
+              featureVector     TEXT NOT NULL DEFAULT '[0.4,0.5,0,0.5,0,0,0]'
+            );
+          `);
         },
       },
     ];
@@ -439,6 +459,58 @@ export class StrategyStore {
     } catch {
       return null;
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // STRATEGIST LESSONS — Persistent learning for the strategist
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Get all strategist lessons, optionally filtering by active only. */
+  getStrategistLessons(activeOnly: boolean = true): Lesson[] {
+    const rows = activeOnly
+      ? this.db.prepare("SELECT * FROM strategist_lessons WHERE deprecated = 0 ORDER BY weight DESC").all()
+      : this.db.prepare("SELECT * FROM strategist_lessons ORDER BY weight DESC").all();
+    return (rows as any[]).map((r) => ({
+      id: r.id,
+      category: r.category,
+      insight: r.insight,
+      weight: r.weight,
+      reinforcementCount: r.reinforcementCount,
+      createdAt: r.createdAt,
+      lastReinforcedAt: r.lastReinforcedAt,
+      deprecated: r.deprecated === 1,
+      context: r.context ?? null,
+      featureVector: JSON.parse(r.featureVector || '[0.4,0.5,0,0.5,0,0,0]'),
+    }));
+  }
+
+  /** Replace ALL strategist lessons with a new set. */
+  replaceStrategistLessons(lessons: Lesson[]): void {
+    const tx = this.db.transaction(() => {
+      this.db.exec("DELETE FROM strategist_lessons");
+      const insert = this.db.prepare(`
+        INSERT INTO strategist_lessons (id, category, insight, weight, reinforcementCount, createdAt, lastReinforcedAt, deprecated, context, featureVector)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const l of lessons) {
+        if (l.deprecated) continue; // Don't store deprecated lessons
+        insert.run(
+          l.id, l.category, l.insight, l.weight, l.reinforcementCount,
+          l.createdAt, l.lastReinforcedAt, l.deprecated ? 1 : 0,
+          l.context ?? null, JSON.stringify(l.featureVector),
+        );
+      }
+    });
+    tx();
+  }
+
+  /** Get active strategist lessons formatted for the strategist prompt. */
+  formatStrategistLessons(): string {
+    const lessons = this.getStrategistLessons(true);
+    if (lessons.length === 0) return "No strategist lessons yet.";
+    return lessons.map((l) =>
+      `[${l.category}] (w: ${l.weight.toFixed(2)}, reinforced: ${l.reinforcementCount}x) ${l.insight}`
+    ).join("\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════

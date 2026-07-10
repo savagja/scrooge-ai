@@ -23,9 +23,55 @@ import { ingestMacroAndSector } from "./macro.js";
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _store: SignalStore | null = null;
-let _watchlist: string[] = [];
 let _timerId: ReturnType<typeof setInterval> | null = null;
 let _cycleCount = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DYNAMIC TICKER SET — no static watchlist
+//
+// Each research tick, we derive which tickers to scan from the research DB
+// itself. Broad-market screeners (Yahoo movers, Alpaca news, EDGAR with
+// high-impact items) discover tickers unconditionally. Those tickers then
+// get picked up by per-ticker scans (volume, gaps, range breaks, Reddit)
+// on subsequent cycles.
+//
+// This creates a self-reinforcing loop:
+//   Broad discovery → tickers in DB → per-ticker analysis → more signals
+//
+// Core seed tickers provide baseline coverage so we never go "blind".
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAX_SCAN_TICKERS = 100;
+
+/**
+ * Build the dynamic ticker set for per-ticker scans.
+ * Sources:
+ *   1. Core seed tickers (always included for baseline)
+ *   2. Tickers with signals in the last 7 days (self-reinforcing discovery)
+ */
+function getScanTickers(): string[] {
+  const tickers = new Set<string>();
+
+  // Core seed tickers — broad market coverage baseline
+  const CORE = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "TSLA"];
+  for (const t of CORE) tickers.add(t);
+
+  // Recent tickers from research DB — self-reinforcing discovery loop
+  try {
+    const store = getSignalStore();
+    const recent = store._execSql(
+      `SELECT DISTINCT ticker FROM signals WHERE timestamp >= datetime('now', '-7 days') ORDER BY timestamp DESC LIMIT ?`,
+      [MAX_SCAN_TICKERS]
+    );
+    for (const row of recent) {
+      if (row.ticker && typeof row.ticker === 'string' && String(row.ticker) !== 'UNKNOWN') {
+        tickers.add(String(row.ticker));
+      }
+    }
+  } catch {}
+
+  return Array.from(tickers).slice(0, MAX_SCAN_TICKERS);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HEALTH MONITORING — Track which sources succeed/fail
@@ -207,7 +253,8 @@ async function ingestAlpacaNews(store: SignalStore): Promise<void> {
  */
 async function ingestEdgarFilings(store: SignalStore): Promise<void> {
   try {
-    const filings = await fetchEdgarFilings(_watchlist);
+    const tickers = getScanTickers();
+    const filings = await fetchEdgarFilings(tickers);
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const f of filings) {
@@ -248,7 +295,7 @@ async function ingestEdgarFilings(store: SignalStore): Promise<void> {
  */
 async function ingestRedditMentions(store: SignalStore): Promise<void> {
   try {
-    const scans = await scanRedditMentions(_watchlist);
+    const scans = await scanRedditMentions(getScanTickers());
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const s of scans) {
@@ -274,7 +321,7 @@ async function ingestRedditMentions(store: SignalStore): Promise<void> {
  */
 async function ingestVolumeScans(store: SignalStore): Promise<void> {
   try {
-    const scans = await scanRelativeVolume(_watchlist);
+    const scans = await scanRelativeVolume(getScanTickers());
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const s of scans) {
@@ -300,7 +347,7 @@ async function ingestVolumeScans(store: SignalStore): Promise<void> {
  */
 async function ingestPreMarketGaps(store: SignalStore): Promise<void> {
   try {
-    const gaps = await scanPreMarketGaps(_watchlist);
+    const gaps = await scanPreMarketGaps(getScanTickers());
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const g of gaps) {
@@ -326,7 +373,7 @@ async function ingestPreMarketGaps(store: SignalStore): Promise<void> {
  */
 async function ingestRangeBreaks(store: SignalStore): Promise<void> {
   try {
-    const breaks = await scanRangeBreaks(_watchlist);
+    const breaks = await scanRangeBreaks(getScanTickers());
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const b of breaks) {
@@ -431,7 +478,7 @@ async function researchTick(): Promise<void> {
   if (now - _lastFundamentalsTime > FUNDAMENTALS_INTERVAL_MS) {
     _lastFundamentalsTime = now;
     try {
-      await refreshFundamentals(store, _watchlist);
+      await refreshFundamentals(store, getScanTickers());
       recordSourceSuccess("fundamentals");
       console.log("[RESEARCH] Fundamentals refreshed");
     } catch (e: any) {
@@ -469,13 +516,12 @@ export function getResearchHealth(): Record<string, { successes: number; failure
  * Creates/finds the SQLite DB, starts the independent research timer.
  * Returns the SignalStore instance.
  */
-export async function initResearch(dbPath: string, watchlist: string[]): Promise<SignalStore> {
+export async function initResearch(dbPath: string, _watchlist?: string[]): Promise<SignalStore> {
   if (_store) {
     console.warn("[RESEARCH] Already initialized. Returning existing store.");
     return _store;
   }
 
-  _watchlist = watchlist;
   const store = new SignalStore(dbPath);
   await store.init();
   _store = store;

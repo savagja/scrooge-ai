@@ -105,7 +105,15 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 | | |
 | **`src/state/`** | |
 | `portfolio.ts` | **Portfolio state manager.** Saves to `data/state.json`. Full learning engine: calibration table updates, vector memory insertion, cosine similarity search, equity curve snapshots, dashboard export. |
-| `strategies.ts` | **Strategy store.** SQLite wrapper for `data/strategies.db`. Read/write strategies, lifecycle updates, pruning, top-K queries. |
+| `strategies.ts` | **Strategy store.** SQLite wrapper for `data/strategies.db`. Read/write strategies, lifecycle updates, pruning, top-K queries, strategist lesson storage. |
+| |
+| **`src/retrospective/`** | **Daily retrospective (cron/systemd-timer after market close)** |
+| `retro-cli.ts` | Standalone CLI entry point |
+| `retrospective.ts` | Orchestrator — runs what-if → trader retro → strategist retro |
+| `analyzer.ts` | JSON extraction and shared utilities |
+| `what-if.ts` | Strategy grading (1-5) with hypothetical P&L |
+| `trader-retrospective.ts` | Trader retro — execution quality, trader lessons → state.json |
+| `strategist-retrospective.ts` | Strategist retro — hypothesis quality, strategist lessons → strategies.db |
 | | |
 | **Entry scripts (root)** | |
 | `strategist.ts` | CLI entry for the strategist: `tsx strategist.ts` |

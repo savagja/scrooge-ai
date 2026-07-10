@@ -68,6 +68,7 @@ The strategist gets **no execution tools**. It cannot place orders, check positi
 | `get_macro_calendar` | Upcoming CPI, FOMC, NFP, PPI events |
 | `describe_datasets` | See what data is in the research DB |
 | `consult_memory` | **Read-only** — check past trade outcomes for similar setups |
+| `consult_strategist_lessons` | **Strategist's own lessons** — signal quality, strategy×regime fit, catalyst assessment patterns. Updated daily by the strategist retrospective. Call at session start. |
 | `create_strategy` | Store a new strategy with thesis, confidence, state |
 | `update_strategy` | Update state, confidence, rationale of existing strategy |
 | `archive_strategy` | Mark a strategy as stale/failed and stop tracking |

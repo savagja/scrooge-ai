@@ -26,7 +26,7 @@ The trader gets execution tools + position management. The strategy-management t
 | `place_sell_order` | Exit a position (covers both longs and shorts) |
 | `hold_cash` | Explicitly do nothing (forces reasoning) |
 | `record_decision` | Log what was decided and why |
-| `consult_memory` | Check lessons and similar past trades before deciding |
+| `consult_memory` | Check **trader** lessons and similar past trades before deciding. Lessons cover execution timing, exit discipline, position sizing, and strategy selection patterns. Updated daily by the trader retrospective. |
 
 ## Trader Prompt Philosophy — Strategy-Aware
 

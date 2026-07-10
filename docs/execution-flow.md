@@ -63,10 +63,50 @@ Trader launches
 
 ```
 Trader session ends
-  ├─ Run daily retrospective
   └─ Save final state
 
 Strategist session ends
-  ├─ Write wrap-up: "Here's what I was watching, what played out"
   └─ Sleep until next pre-market
+
+Retrospective process launches (independent process via cron/systemd-timer):
+  ├─ 1. Run what-if analysis on ALL strategies from today
+  │     Grade each strategy 1-5 based on hypothetical P&L.
+  │     Extract recurring patterns (abstractions).
+  │
+  ├─ 2. Run TRADER retrospective
+  │     Input: trades + executed strategies + what-if grades + calibration table
+  │     LLM evaluates: entry timing, exit discipline, strategy selection, missed G4-5s
+  │     Output: trader whatWorked/whatDidnt/whatToChange + evolved trader lessons
+  │     Persist: trader lessons → state.memory.lessons (state.json)
+  │
+  ├─ 3. Run STRATEGIST retrospective
+  │     Input: what-if grades + abstractions + lifecycle counts + existing strategist lessons
+  │     LLM evaluates: signal source quality, strategy×regime fit, lifecycle mgmt, catalyst assessment
+  │     Output: strategist overview + 4 analysis sections + evolved strategist lessons
+  │     Persist: strategist lessons → strategist_lessons table (strategies.db)
+  │
+  └─ 4. Build combined markdown report
+        Sections: Summary | Trader Analysis (whatWorked/whatDidnt/whatToChange) |
+                  Strategist Analysis (overview, signals, regime-fit, lifecycle, catalysts) |
+                  What-If Strategy Analysis
+        Persist: state.dailyReports[]
+        Serve: GET /api/report
+```
+
+### Next Day Pre-Market
+
+```
+Strategist launches
+  ├─ 1. consult_strategist_lessons — read evolved lessons from last night's retro
+  ├─ 2. Then normal pre-market flow (research DB, signals, create strategies)
+  ...
+```
+
+### Next Day Trading Session
+
+```
+Trader launches
+  ├─ consult_memory — reads evolved trader lessons
+  ├─ Then normal event loop
+  ...
 ```

@@ -41,6 +41,36 @@ import {
   searchSignalsTool as _ss, describeDatasetsTool as _dd,
 } from "./tools.js";
 
+// ── Strategist-only: consult_strategist_lessons ──────────────────────────
+
+export const consultStrategistLessonsTool = defineTool({
+  name: "consult_strategist_lessons",
+  label: "Consult Strategist Lessons",
+  description: "Read the strategist\'s own lessons from past retrospectives. These lessons cover: signal source quality, strategy x regime fit, catalyst assessment, and conviction scoring. Updated daily after market close. Use this at the start of each session to orient yourself on what patterns have been working or failing.",
+  parameters: Type.Object({}),
+  execute: async () => {
+    try {
+      const store = requireStrategies();
+      const lessons = store.getStrategistLessons(true);
+      if (lessons.length === 0) {
+        return text("No strategist lessons yet. They accumulate after each daily retrospective.");
+      }
+      const lines = ["=== STRATEGIST LESSONS (from past retrospectives) ===", ""];
+      for (const l of lessons) {
+        lines.push(`[${l.category}] (w: ${l.weight.toFixed(2)}, reinforced: ${l.reinforcementCount}x)`);
+        lines.push(`  ${l.insight}`);
+        if (l.context) lines.push(`  Context: ${l.context}`);
+        lines.push(`  Reinforced: ${l.lastReinforcedAt.slice(0, 10)}`);
+        lines.push("");
+      }
+      lines.push("Use these lessons to improve your hypothesis formation and signal assessment.");
+      return text(lines.join("\n"));
+    } catch (e: any) { return text("Error: " + e.message); }
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 export const fetchMarketDataTool = _fmd;
 export const fetchNewsTool = _fn;
 export const fetchAllNewsTool = _fan;
@@ -241,6 +271,6 @@ export const allStrategistTools = [
   fetchMarketDataTool, fetchNewsTool, fetchAllNewsTool, fetchEdgarFilingsTool,
   scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
   scanRedditTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
-  searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool,
+  searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool,
   createStrategyTool, updateStrategyTool, archiveStrategyTool,
 ];

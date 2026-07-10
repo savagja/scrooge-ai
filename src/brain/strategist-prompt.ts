@@ -33,6 +33,7 @@ You have research tools only — no execution. Use them to find signal clusters:
 - create_strategy — Store a new strategy
 - update_strategy — Update an existing strategy's state/confidence/thesis
 - archive_strategy — Mark a strategy as stale or failed
+- consult_strategist_lessons — Read strategist lessons from past retrospectives (signal quality, strategy×regime fit, catalyst assessment)
 
 ## Strategy Creation Guidelines
 Each strategy needs:
