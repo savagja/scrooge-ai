@@ -10,12 +10,68 @@
  * - Item 8.01: Other events (often used for material announcements)
  * - Item 5.02: Departure of directors / principal officers
  * - Item 2.01: Completion of acquisition or disposition of assets
+ *
+ * ARCHITECTURE NOTE:
+ * SEC RSS does NOT include tickers. It provides CIK (Central Index Key) numbers.
+ * We resolve CIK -> ticker via the SEC Company Submissions API:
+ *   https://data.sec.gov/submissions/CIK{0000XXXXXX}.json
+ * This is the official SEC endpoint, returns ticker, name, exchange, etc.
+ * Results are cached in-memory to avoid hammering the API.
  */
 
 import { XMLParser } from "fast-xml-parser";
 
 const EDGAR_RSS = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom";
 const SEC_HEADERS = { "User-Agent": "ScroogeBot/1.0 (contact@example.com)" };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CIK -> TICKER CACHE
+// ═══════════════════════════════════════════════════════════════════════════
+
+const _cikCache = new Map<string, string | null>();
+
+/**
+ * Resolve a CIK to its ticker symbol using the SEC Company Submissions API.
+ * Results cached in-memory (no TTL — CIKs don't change).
+ */
+async function cikToTicker(cik: string): Promise<string | null> {
+  if (_cikCache.has(cik)) return _cikCache.get(cik) ?? null;
+
+  try {
+    // Strip leading zeros for lookup
+    const paddedCik = cik.startsWith("000") ? cik : cik.padStart(10, "0");
+    const url = `https://data.sec.gov/submissions/CIK${paddedCik}.json`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "ScroogeBot/1.0 (contact@example.com)",
+        "Accept": "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      _cikCache.set(cik, null);
+      return null;
+    }
+
+    const data = await res.json();
+    // SEC API returns tickers array on submission object or on the main object
+    const tickers = data.tickers || [];
+    let ticker: string | null = null;
+    if (tickers.length > 0) {
+      ticker = typeof tickers[0] === "string" ? tickers[0] : (tickers[0].ticker || null);
+    }
+
+    _cikCache.set(cik, ticker);
+    return ticker;
+  } catch {
+    _cikCache.set(cik, null);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════════════════════
 
 export interface EdgarEntry {
   id: string;
@@ -32,8 +88,14 @@ export interface EdgarEntry {
 const seenFilings = new Set<string>();
 
 /**
+ * The high-impact 8-K items we care about.
+ * SEC defines these exactly; any filing mentioning these is worth flagging.
+ */
+const HIGH_IMPACT_ITEMS = ["1.01", "2.02", "5.02", "7.01", "8.01", "2.01"];
+
+/**
  * Fetch the latest 8-K filings from EDGAR RSS.
- * Returns only filings relevant to our watchlist.
+ * Returns filings with high-impact items, with tickers resolved from CIK.
  */
 export async function fetchEdgarFilings(watchlist: string[]): Promise<EdgarEntry[]> {
   try {
@@ -47,26 +109,23 @@ export async function fetchEdgarFilings(watchlist: string[]): Promise<EdgarEntry
     const parser = new XMLParser({ ignoreAttributes: false });
     const parsed = parser.parse(xml);
 
-    const entries = parsed.feed?.entry || [];
-    const filings: EdgarEntry[] = [];
+    const rawEntries = parsed.feed?.entry || [];
+    const entries = Array.isArray(rawEntries) ? rawEntries : [rawEntries];
+
+    // Phase 1: Extract CIK and items from RSS (fast, no API calls)
+    const parsedEntries: Array<{
+      id: string;
+      title: string;
+      cik: string;
+      companyName: string;
+      filingDate: string;
+      items: string[];
+      link: string;
+    }> = [];
 
     for (const entry of entries) {
       const title = String(entry.title || "");
-      const content = String(entry.content?._ || entry.content || "");
       const filingId = String(entry.id || "");
-      const link = String(entry.link?.["@_href"] || entry.link || "");
-      const filingDate = String(entry.updated || entry.filed || new Date().toISOString());
-
-      // Extract CIK and ticker from content
-      const cikMatch = content.match(/CIK=(\d+)/);
-      const cik = cikMatch ? cikMatch[1] : "";
-
-      const tickerMatch = content.match(/(CIK=\d+).*?>([A-Z]+)</);
-      const ticker = tickerMatch ? tickerMatch[2] : "";
-
-      // Extract 8-K items
-      const itemMatches = content.match(/Item\s+([\d.]+)/g);
-      const items = itemMatches ? itemMatches.map((m: string) => m.replace(/Item\s+/, "")) : [];
 
       // Dedup
       if (seenFilings.has(filingId)) continue;
@@ -77,33 +136,87 @@ export async function fetchEdgarFilings(watchlist: string[]): Promise<EdgarEntry
         arr.slice(-100).forEach((h) => seenFilings.add(h));
       }
 
-      // Only keep filings for watchlist or filings with high-impact items
+      // Extract CIK from title: "8-K - COMPANY NAME (0000123456) (Filer)"
+      const cikMatch = title.match(/\((\d+)\)/);
+      const cik = cikMatch ? cikMatch[1] : "";
+
+      // Extract company name: remove "8-K - " prefix and " (CIK) (Filer)" suffix
+      const companyName = title
+        .replace(/^8-K\s*-\s*/i, "")
+        .replace(/\s*\(\d+\)\s*\(Filer\)\s*$/i, "")
+        .trim();
+
+      // Extract items from <summary> (SEC uses <summary>, not <content>)
+      let summaryText = "";
+      if (entry.summary) {
+        if (typeof entry.summary === "string") {
+          summaryText = entry.summary;
+        } else if (entry.summary["#text"]) {
+          summaryText = entry.summary["#text"];
+        }
+        summaryText = summaryText.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      }
+
+      const itemMatches = summaryText.match(/Item\s+([\d.]+)/g);
+      const items = itemMatches
+        ? itemMatches.map((m: string) => m.replace(/Item\s+/, ""))
+        : [];
+
+      // Filing date from <updated>
+      const filingDate = String(entry.updated || entry.filed || new Date().toISOString());
+
+      // Link
+      let link = "";
+      if (typeof entry.link === "string") {
+        link = entry.link;
+      } else if (entry.link?.["@_href"]) {
+        link = entry.link["@_href"];
+      }
+
+      parsedEntries.push({
+        id: filingId,
+        title,
+        cik,
+        companyName: companyName || title,
+        filingDate,
+        items,
+        link,
+      });
+    }
+
+    // Phase 2: Filter to high-impact items only and resolve tickers
+    const filings: EdgarEntry[] = [];
+
+    for (const pe of parsedEntries) {
+      const hasHighImpact = pe.items.some((i: string) =>
+        HIGH_IMPACT_ITEMS.some((hi) => i.includes(hi))
+      );
+
+      if (!hasHighImpact && !pe.cik) continue;
+
+      // Resolve CIK to ticker (only for entries we're keeping — saves API calls)
+      let ticker = "";
+      if (pe.cik) {
+        const resolved = await cikToTicker(pe.cik);
+        if (resolved) ticker = resolved.toUpperCase();
+      }
+
+      // Check watchlist relevance (now with real ticker)
       const isRelevantTicker = watchlist.some(
         (w) => ticker.toUpperCase() === w.toUpperCase()
       );
 
-      const highImpactItems = ["1.01", "2.02", "5.02", "7.01", "8.01", "2.01"];
-      const hasHighImpact = items.some((i: string) =>
-        highImpactItems.some((hi) => i.includes(hi))
-      );
-
       if (!isRelevantTicker && !hasHighImpact) continue;
 
-      // Parse company name from title
-      const companyName = title
-        .replace(/\s*-\s*8-K\s*$/i, "")
-        .replace(/\s*-\s*Current report\s*$/i, "")
-        .trim();
-
       filings.push({
-        id: filingId,
-        cik,
-        ticker: ticker.toUpperCase(),
-        companyName,
-        filingDate,
-        items,
-        title,
-        link,
+        id: pe.id,
+        cik: pe.cik,
+        ticker,
+        companyName: pe.companyName,
+        filingDate: pe.filingDate,
+        items: pe.items,
+        title: pe.title,
+        link: pe.link,
       });
     }
 
@@ -169,77 +282,4 @@ export function scoreFiling(filing: EdgarEntry): { score: number; reason: string
     score: Math.min(10, score),
     reason: reasons.join("; ") || "General 8-K filing",
   };
-}
-
-/**
- * Map CIK to ticker (simplified lookup for common names).
- * SEC doesn't include tickers in the RSS, so we try to infer.
- */
-export function resolveTickerFromName(companyName: string): string | null {
-  // Common company name mappings for quick lookup
-/**
- * Parse EDGAR Atom feed entries manually (no XML parser dependency — avoids
- * fast-xml-parser issues on armv7l Raspberry Pi and edge-case XML).
- */
-function parseEdgarAtomEntries(xml: string): Array<{ id: string; title: string; content: string; link: string; updated: string }> {
-  const entries: Array<{ id: string; title: string; content: string; link: string; updated: string }> = [];
-
-  // Split by <entry> tags
-  const entryRegex = /<entry>([\s\S]*?)<\/entry>/gi;
-  let entryMatch;
-
-  while ((entryMatch = entryRegex.exec(xml)) !== null) {
-    const block = entryMatch[1];
-
-    // Helper: extract content between tags, handling CDATA
-    const extract = (tag: string): string => {
-      const cdataRegex = new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, 'i');
-      const plainRegex = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
-      const m = cdataRegex.exec(block) || plainRegex.exec(block);
-      return m ? m[1].trim() : "";
-    };
-
-    // Extract href from <link> tag
-    const extractLink = (): string => {
-      const linkRegex = /<link[^>]*href="([^"]+)"[^>]*\/?>/i;
-      const m = linkRegex.exec(block);
-      if (m) return m[1];
-      const linkRelRegex = /<link[^>]*rel="alternate"[^>]*href="([^"]+)"/i;
-      const m2 = linkRelRegex.exec(block);
-      return m2 ? m2[1] : "";
-    };
-
-    entries.push({
-      id: extract("id"),
-      title: extract("title"),
-      content: extract("content"),
-      link: extractLink(),
-      updated: extract("updated") || extract("published"),
-    });
-  }
-
-  return entries;
-}
-
-  const knownMappings: Record<string, string> = {
-    "APPLE": "AAPL",
-    "TESLA": "TSLA",
-    "NVIDIA": "NVDA",
-    "MICROSOFT": "MSFT",
-    "AMAZON": "AMZN",
-    "ALPHABET": "GOOGL",
-    "META": "META",
-    "NETFLIX": "NFLX",
-    "SALESFORCE": "CRM",
-    "ADVANCED MICRO DEVICES": "AMD",
-    "PALANTIR": "PLTR",
-    "COINBASE": "COIN",
-    "ROBINHOOD": "HOOD",
-  };
-
-  const upper = companyName.toUpperCase();
-  for (const [name, ticker] of Object.entries(knownMappings)) {
-    if (upper.includes(name)) return ticker;
-  }
-  return null;
 }

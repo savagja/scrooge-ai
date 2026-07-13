@@ -1,23 +1,13 @@
 /**
  * Social sentiment tracker.
- * - Reddit: PRAW for r/wallstreetbets, r/stocks mention velocity
- * - Currently limited to Reddit (Twitter/X is $100+/mo, dead to us)
- *
- * Tracks mention VELOCITY (mentions/hour), not just counts.
- * The LLM can read top comments for sentiment quality.
- */
-
-/**
- * Social sentiment tracker.
- * - Reddit: old.reddit.com RSS/JSON fallback (undocumented JSON API now blocked)
+ * - Reddit: RSS feed parsing with rate limiting (Reddit blocks unauthenticated JSON)
  * - Tracks mention VELOCITY (mentions/hour), not just counts.
  *
- * Reddit JSON API now requires OAuth even for public subs (returns 403 with HTML).
- * We use two fallback approaches:
- *   1. old.reddit.com (sometimes still serves JSON to bots)
- *   2. Reddit RSS feed (always works, no auth, but only titles)
+ * NOTE: Reddit now blocks all unauthenticated API access (403 for JSON, 429/403 for RSS).
+ * This module tries RSS with respectful rate limiting. If Reddit blocks us entirely,
+ * we return empty results gracefully — the system runs fine without social data.
  *
- * If both fail, we return empty results. The LLM can still use the
+ * A future upgrade could use a free proxy or a $5/mo data provider like Quiver Quantitative.
  * research DB's signal store to detect recent Reddit-related signals.
  */
 
@@ -52,9 +42,50 @@ function saveMentions() {
 
 loadMentions();
 
+const REDDIT_RATE_LIMIT_MS = 60000; // Max 1 request per minute to Reddit
+const REDDIT_BLACKLIST_MS = 5 * 60 * 1000; // If Reddit blocks us, don't retry for 5 min
+let _lastRedditFetch = 0;
+let _lastRedditBlocked = 0; // When we last got a 4xx from Reddit
+
+/**
+ * Fetch from Reddit with built-in rate limiting.
+ * If Reddit returns a 4xx, we blacklist it for 5 minutes to avoid wasting cycles.
+ * Returns null if we can't fetch (rate limited, blocked, or error).
+ */
+async function fetchRedditWithRateLimit(url: string, headers: Record<string, string>): Promise<Response | null> {
+  const now = Date.now();
+  
+  // If Reddit recently blocked us, skip entirely
+  if (now - _lastRedditBlocked < REDDIT_BLACKLIST_MS) {
+    return null;
+  }
+  
+  // Rate limit: max 1 request per 60s
+  const elapsed = now - _lastRedditFetch;
+  if (elapsed < REDDIT_RATE_LIMIT_MS) {
+    await new Promise(r => setTimeout(r, REDDIT_RATE_LIMIT_MS - elapsed));
+  }
+  _lastRedditFetch = Date.now();
+  
+  try {
+    const res = await fetch(url, { headers });
+    
+    // If blocked, set blacklist
+    if (res.status === 403 || res.status === 429) {
+      _lastRedditBlocked = Date.now();
+      return null;
+    }
+    
+    return res;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Scan Reddit for mentions of watchlist tickers.
- * Uses multiple fallback approaches since Reddit blocks the JSON API.
+ * Uses Reddit RSS with respectful rate limiting (1 req/min).
+ * If RSS fails, tries old.reddit.com JSON as fallback.
  * Returns mention velocity (mentions in last hour vs previous hour).
  */
 export interface RedditScan {
@@ -151,30 +182,35 @@ async function scanOldRedditJson(subreddits: string[], watchlist: string[], oneH
   return results;
 }
 
-/**
- * Approach 2: Reddit RSS feed (always works, no auth).
- * Only has titles, no selftext, but enough to detect ticker mentions.
- */
-async function scanRedditRss(subreddits: string[], watchlist: string[], oneHour: number): Promise<RedditScan[]> {
-  const results: RedditScan[] = [];
+export async function scanRedditMentions(
+  watchlist: string[]
+): Promise<RedditScan[]> {
+  const subreddits = ["wallstreetbets", "stocks", "wallstreetbetselite"];
+  const oneHour = 3600000;
+  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ScroogeBot/1.0";
 
+  // Try RSS first (most reliable with proper rate limiting)
+  let results: RedditScan[] = [];
   for (const sub of subreddits) {
-    try {
-      const res = await fetch(
-        `https://www.reddit.com/r/${sub}/.rss`,
-        { headers: { "User-Agent": "ScroogeBot/1.0 (contact@example.com)" } }
-      );
-      if (!res.ok) continue;
+    const res = await fetchRedditWithRateLimit(
+      `https://www.reddit.com/r/${sub}/.rss`,
+      { "User-Agent": ua }
+    );
 
+    if (!res || !res.ok) continue;
+
+    try {
       const xml = await res.text();
       const now = Date.now();
 
-      // Simple XML title extraction — parse <entry><title>...</title>
-      const titleRegex = /<entry>[\s\S]*?<title>(.*?)<\/title>/gi;
+      // Parse entries
+      const entryRegex = /<entry>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<content[^>]*>(.*?)<\/content>[\s\S]*?<\/entry>/gi;
       let match;
-      while ((match = titleRegex.exec(xml)) !== null) {
+
+      while ((match = entryRegex.exec(xml)) !== null) {
         const title = match[1] || "";
-        const foundTickers = extractTickers(title, watchlist);
+        const decodedTitle = title.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'");
+        const foundTickers = extractTickers(decodedTitle, watchlist);
         if (foundTickers.length === 0) continue;
 
         for (const symbol of foundTickers) {
@@ -198,11 +234,11 @@ async function scanRedditRss(subreddits: string[], watchlist: string[], oneHour:
           }
 
           result.totalMentions++;
-          result.mentionsLastHour++; // RSS is always current
+          result.mentionsLastHour++;
 
           if (result.topPosts.length < 3) {
             result.topPosts.push({
-              title,
+              title: decodedTitle.slice(0, 200),
               subreddit: sub,
               score: 0,
               url: `https://reddit.com/r/${sub}`,
@@ -213,23 +249,14 @@ async function scanRedditRss(subreddits: string[], watchlist: string[], oneHour:
     } catch {
       continue;
     }
+
+    // If we got results from this subreddit, don't hit more
+    if (results.length > 0) break;
   }
 
-  return results;
-}
-
-export async function scanRedditMentions(
-  watchlist: string[]
-): Promise<RedditScan[]> {
-  const subreddits = ["wallstreetbets", "stocks", "wallstreetbetselite"];
-  const oneHour = 3600000;
-
-  // Try JSON approach first (fallback to old.reddit.com)
-  let results = await scanOldRedditJson(subreddits, watchlist, oneHour);
-
-  // If JSON returned nothing (blocked), try RSS
+  // If RSS got nothing, try old.reddit.com JSON (usually blocked but worth trying)
   if (results.length === 0) {
-    results = await scanRedditRss(subreddits, watchlist, oneHour);
+    results = await scanOldRedditJson(subreddits, watchlist, oneHour);
   }
 
   // Calculate velocity

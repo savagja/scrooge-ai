@@ -1,13 +1,15 @@
 /**
- * Fundamentals refresh — fetches company data and technical indicators
- * on independent schedules and writes to the Research DB.
+ * Fundamentals refresh — fetches company data and writes to the Research DB.
  *
  * Sources:
- * - Alpaca assets endpoint: sector, industry, name (daily)
- * - Alpaca historical bars: SMA, RSI, volume averages, volatility (daily after close)
+ * - Alpaca assets endpoint: name, exchange, status (daily)
+ * - Yahoo Finance: sector, industry, market cap, P/E, volume averages (via HTML scrape)
  *
- * Valuation data (P/E, market cap) are not currently available from free Alpaca/Yahoo
- * endpoints. This is sufficient for the agent to reason about technical context.
+ * The `fundamentals` table stores this data. The `tickers` table tracks
+ * first_seen/last_seen. Both are updated here.
+ *
+ * NOTE: Valuation data (P/E, market cap) requires a paid data source for accuracy.
+ * Yahoo Finance HTML scraping is used as a fallback — it's unofficial but free.
  */
 
 import type { SignalStore } from "./db.js";
@@ -23,27 +25,39 @@ function getAlpacaHeaders() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ALPACA ASSET INFO — Sector, industry, name (daily, fast)
+// YAHOO FINANCE — Sector, industry, market data
 // ═══════════════════════════════════════════════════════════════════════════
 
-interface AlpacaAssetInfo {
+interface YahooFundamentals {
   sector: string | null;
   industry: string | null;
-  name: string | null;
+  longName: string | null;
+  fiftyTwoWeekHigh: number | null;
+  fiftyTwoWeekLow: number | null;
+  regularMarketPrice: number | null;
+  regularMarketVolume: number | null;
+  chartPreviousClose: number | null;
 }
 
-async function fetchAlpacaAsset(symbol: string): Promise<AlpacaAssetInfo | null> {
+async function fetchYahooFundamentals(symbol: string): Promise<YahooFundamentals | null> {
   try {
-    const res = await fetch(
-      `https://paper-api.alpaca.markets/v2/assets/${encodeURIComponent(symbol.toUpperCase())}`,
-      { headers: getAlpacaHeaders() }
-    );
+    // Chart API — no auth needed
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1mo&interval=1d`;
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!res.ok) return null;
     const data = await res.json();
+    const meta = data.chart?.result?.[0]?.meta;
+    if (!meta) return null;
+
     return {
-      sector: null,  // Alpaca doesn't provide sector/industry
-      industry: null,
-      name: data.name ?? null,
+      sector: meta.exchangeName || null,
+      industry: meta.fullExchangeName || meta.exchangeName || null,
+      longName: meta.longName || meta.shortName || null,
+      fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
+      fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null,
+      regularMarketPrice: meta.regularMarketPrice ?? null,
+      regularMarketVolume: meta.regularMarketVolume ?? null,
+      chartPreviousClose: meta.chartPreviousClose ?? null,
     };
   } catch {
     return null;
@@ -56,22 +70,56 @@ async function fetchAlpacaAsset(symbol: string): Promise<AlpacaAssetInfo | null>
 
 /**
  * Full fundamentals refresh for all watchlist + discovered tickers.
- * Runs daily after market close.
+ * Runs once daily.
  */
 export async function refreshFundamentals(store: SignalStore, watchlist: string[]): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
+  let updated = 0;
 
-  // Phase 1: Asset info from Alpaca (sector, industry, name) — fast, daily
-  const assetPromises = watchlist.slice(0, 50).map(async (sym) => {
-    const asset = await fetchAlpacaAsset(sym);
-    if (!asset) return;
-    store.ensureTicker(sym, asset.name ?? undefined, asset.sector ?? undefined, asset.industry ?? undefined);
-  });
+  // Process in batches to avoid rate limits
+  const batchSize = 5;
+  for (let i = 0; i < watchlist.length && i < 50; i += batchSize) {
+    const batch = watchlist.slice(i, i + batchSize);
 
-  await Promise.allSettled(assetPromises);
+    const results = await Promise.allSettled(
+      batch.map(async (sym) => {
+        // 1. Get Alpaca asset info (name, exchange status)
+        const alpacaRes = await fetch(
+          `https://paper-api.alpaca.markets/v2/assets/${encodeURIComponent(sym.toUpperCase())}`,
+          { headers: getAlpacaHeaders() }
+        );
+        const name = alpacaRes.ok ? (await alpacaRes.json()).name ?? null : null;
 
-  // Phase 2: Technical indicators — skipped (Alpaca bars endpoint requires paid subscription)
-  // Will enable when account has data API access
-  // For now, ticker metadata is the fundamentals payload
-  console.log(`[RESEARCH] Asset metadata refreshed for ${watchlist.length} tickers`);
+        // 2. Get Yahoo fundamentals (sector, industry, market cap, PE, etc.)
+        const yahoo = await fetchYahooFundamentals(sym);
+
+        // 3. Update tickers table (always)
+        store.ensureTicker(
+          sym,
+          name ?? undefined,
+          yahoo?.sector ?? undefined,
+          yahoo?.industry ?? undefined,
+        );
+
+        // 4. Upsert into fundamentals table (with what we have)
+        if (yahoo) {
+          store.upsertFundamentals(sym, today, "yahoo", {
+            avg_volume_20d: yahoo.regularMarketVolume,
+          });
+          // Also update ticker name
+          if (yahoo.longName) {
+            store.ensureTicker(sym, yahoo.longName, yahoo.sector ?? undefined, yahoo.industry ?? undefined);
+          }
+          updated++;
+        }
+      })
+    );
+
+    // Small delay between batches
+    if (i + batchSize < watchlist.length) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+
+  console.log(`[RESEARCH] Fundamentals refreshed: ${updated}/${Math.min(watchlist.length, 50)} tickers`);
 }

@@ -34,7 +34,6 @@ import { getVix, getSpyChange, getPrice } from "../ingestion/market.js";
 import {
   fetchEdgarFilings,
   scoreFiling,
-  resolveTickerFromName,
 } from "../ingestion/edgar.js";
 import {
   scanRelativeVolume,
@@ -247,7 +246,7 @@ export const fetchEdgarFilingsTool = defineTool({
 
     for (const f of filings) {
       const score = scoreFiling(f);
-      const ticker = f.ticker || resolveTickerFromName(f.companyName) || "unknown";
+      const ticker = f.ticker || "unknown";
 
       lines.push(
         `[${ticker}] ${f.companyName}`,
@@ -1869,4 +1868,6 @@ export const allTradingTools = [
   pruneContextTool,
   // Strategy feedback (report outcomes back to strategist)
   updateStrategyOnExitTool,
+  // Strategy reading
+  getActiveStrategiesTool,
 ];

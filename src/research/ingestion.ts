@@ -288,6 +288,10 @@ async function ingestEdgarFilings(store: SignalStore): Promise<void> {
         sourceUrl: f.link,
       });
     }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
   } catch (e: any) {
     console.warn("[RESEARCH] EDGAR ingest failed:", e.message);
   }
