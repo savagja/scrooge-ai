@@ -76,7 +76,7 @@ export const listStrategiesTool = defineTool({
 
       const lines = ["=== STRATEGIES (" + strategies.length + " found) ===", ""];
       for (const s of strategies) {
-        lines.push(`  [${s.ticker}] ${s.strategy_type} ${s.direction} | ${s.state} | conf:${(s.confidence * 100).toFixed(0)}% conv:${s.conviction}`);
+        lines.push(`  [${s.ticker}] ${s.strategy_type} ${s.direction} | ${s.state} | conviction: ${s.conviction}`);
         lines.push(`    Thesis: ${s.thesis.slice(0, 120)}`);
         if (s.catalyst) lines.push(`    Catalyst: ${s.catalyst.slice(0, 80)}`);
         const grade = s.what_if?.grade ? `G${s.what_if.grade}/5` : "not graded";
@@ -439,7 +439,7 @@ export const updateStrategyTool = defineTool({
       if (params.exit_conditions !== undefined) update.exit_conditions = params.exit_conditions;
       const result = requireStrategies().update(params.strategy_id, update);
       if (!result) return text("Strategy not found: " + params.strategy_id);
-      return text("Updated: " + result.ticker + " (" + params.strategy_id.slice(0, 24) + "...) -> " + result.state + " @" + (result.confidence * 100).toFixed(0) + "%");
+      return text("Updated: " + result.ticker + " (" + params.strategy_id.slice(0, 24) + "...) -> " + result.state + " | conviction: " + result.conviction);
     } catch (e: any) { return text("Error: " + e.message); }
   },
 });

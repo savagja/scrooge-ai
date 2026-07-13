@@ -372,7 +372,15 @@ export const scanRangeBreaksTool = defineTool({
   parameters: Type.Object({}),
   execute: async () => {
     const watchlist = await getWatchlist();
-    const breaks = await scanRangeBreaks(watchlist);
+    const store = getSignalStore();
+    const priceMap = new Map<string, number>();
+    if (store) {
+      for (const sym of watchlist) {
+        const p = store.getLatestPrice(sym);
+        if (p !== null) priceMap.set(sym, p);
+      }
+    }
+    const breaks = await scanRangeBreaks(watchlist, priceMap.size > 0 ? priceMap : undefined);
 
     if (breaks.length === 0) {
       return {

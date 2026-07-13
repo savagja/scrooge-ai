@@ -43,6 +43,32 @@ export function clearPriceCache(): void {
   _priceCache.clear();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DAILY BARS CACHE — Bars don't change for 6+ hours (only once a day after close)
+// Cache them for 6 hours instead of re-fetching every 30 seconds.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const _barsCache = new Map<string, { bars: any[]; fetchedAt: number }>();
+const BARS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+async function getCachedDailyBars(symbol: string, days: number = 25): Promise<any[]> {
+  const key = `${symbol}:${days}`;
+  const cached = _barsCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < BARS_CACHE_TTL_MS) {
+    return cached.bars;
+  }
+  const bars = await getHistoricalDailyBarsImpl(symbol, days);
+  _barsCache.set(key, { bars, fetchedAt: Date.now() });
+  return bars;
+}
+
+/**
+ * Clear the bars cache. Call if you want fresh data (e.g., after market close).
+ */
+export function clearBarsCache(): void {
+  _barsCache.clear();
+}
+
 function getHeaders() {
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_SECRET_KEY;
@@ -75,7 +101,7 @@ export interface GapScan {
  * Fetch historical daily bars ending 2 days ago (to avoid the "recent SIP data" 403
  * that paper accounts get). Returns bars ending at yesterday's close.
  */
-async function getHistoricalDailyBars(symbol: string, days: number = 25): Promise<any[]> {
+async function getHistoricalDailyBarsImpl(symbol: string, days: number = 25): Promise<any[]> {
   try {
     // End at the start of 2 days ago UTC (avoids recent data restriction)
     const end = new Date(Date.now() - 2 * 86400000);
@@ -103,7 +129,7 @@ async function getHistoricalDailyBars(symbol: string, days: number = 25): Promis
  * Get yesterday's close from the last complete daily bar (from historical data).
  */
 async function getPriorClose(symbol: string): Promise<number | null> {
-  const bars = await getHistoricalDailyBars(symbol, 5);
+  const bars = await getCachedDailyBars(symbol, 5);
   if (bars.length === 0) return null;
   return bars[bars.length - 1].c;
 }
@@ -113,7 +139,7 @@ async function getPriorClose(symbol: string): Promise<number | null> {
  */
 async function getAverageVolume(symbol: string, days: number = 20): Promise<number | null> {
   try {
-    const bars = await getHistoricalDailyBars(symbol, days);
+    const bars = await getCachedDailyBars(symbol, days);
     if (bars.length < 5) return null;
 
     const volumes = bars.map((b: any) => b.v).filter((v: number) => v > 0);
@@ -175,8 +201,16 @@ export async function getTodayDailyBars(symbol: string): Promise<any[]> {
 /**
  * Scan watchlist for relative volume and price action.
  */
+/**
+ * Scan watchlist for relative volume and price action.
+ * @param watchlist - Tickers to scan
+ * @param priceMap - Optional pre-fetched prices (keyed by symbol). When provided,
+ *   skips Alpaca quote lookups and uses these instead. Useful for agent tools
+ *   that should read from the research DB to avoid rate limits.
+ */
 export async function scanRelativeVolume(
-  watchlist: string[]
+  watchlist: string[],
+  priceMap?: Map<string, number>
 ): Promise<VolumeScan[]> {
   const results: VolumeScan[] = [];
 
@@ -186,8 +220,8 @@ export async function scanRelativeVolume(
     const batch = watchlist.slice(i, i + batchSize);
     const batchResults = await Promise.allSettled(
       batch.map(async (symbol) => {
-        const [price, avgVol, todayVol] = await Promise.all([
-          getCachedPrice(symbol),
+        const price = priceMap?.get(symbol) ?? await getCachedPrice(symbol);
+        const [avgVol, todayVol] = await Promise.all([
           getAverageVolume(symbol, 20),
           getTodayVolume(symbol),
         ]);
@@ -229,8 +263,16 @@ export async function scanRelativeVolume(
  * Scan for pre-market gaps.
  * Compares current price to prior close (from historical bars).
  */
+/**
+ * Scan for pre-market gaps.
+ * Compares current price to prior close (from historical bars).
+ * @param watchlist - Tickers to scan
+ * @param priceMap - Optional pre-fetched prices (keyed by symbol). When provided,
+ *   skips Alpaca quote lookups.
+ */
 export async function scanPreMarketGaps(
-  watchlist: string[]
+  watchlist: string[],
+  priceMap?: Map<string, number>
 ): Promise<GapScan[]> {
   const results: GapScan[] = [];
 
@@ -239,10 +281,8 @@ export async function scanPreMarketGaps(
     const batch = watchlist.slice(i, i + batchSize);
     const batchResults = await Promise.allSettled(
       batch.map(async (symbol) => {
-        const [price, priorClose] = await Promise.all([
-          getCachedPrice(symbol),
-          getPriorClose(symbol),
-        ]);
+        const priorClose = await getPriorClose(symbol);
+        const price = priceMap?.get(symbol) ?? await getCachedPrice(symbol);
 
         if (!price || !priorClose) return null;
 
@@ -274,8 +314,16 @@ export async function scanPreMarketGaps(
  * Find tickers that are breaking out of their 20-day range.
  * Uses historical bars (paper-account compatible) + current quote.
  */
+/**
+ * Find tickers breaking out of their 20-day range.
+ * Uses historical bars + current price.
+ * @param watchlist - Tickers to scan
+ * @param priceMap - Optional pre-fetched prices (keyed by symbol). When provided,
+ *   skips Alpaca quote lookups.
+ */
 export async function scanRangeBreaks(
-  watchlist: string[]
+  watchlist: string[],
+  priceMap?: Map<string, number>
 ): Promise<Array<{ symbol: string; price: number; high20d: number; low20d: number; positionInRange: number }>> {
   const results: { symbol: string; price: number; high20d: number; low20d: number; positionInRange: number }[] = [];
 
@@ -285,14 +333,14 @@ export async function scanRangeBreaks(
     const batchResults = await Promise.allSettled(
       batch.map(async (symbol) => {
         // Use historical bars (avoids paper account's recent SIP restriction)
-        const bars = await getHistoricalDailyBars(symbol, 25);
+        const bars = await getCachedDailyBars(symbol, 25);
         if (bars.length < 10) return null;
 
         const prices = bars.flatMap((b: any) => [b.h, b.l]);
         const high20d = Math.max(...prices);
         const low20d = Math.min(...prices);
 
-        const price = await getCachedPrice(symbol);
+        const price = priceMap?.get(symbol) ?? await getCachedPrice(symbol);
         if (!price) return null;
 
         const range = high20d - low20d;

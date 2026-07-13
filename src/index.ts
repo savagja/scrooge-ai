@@ -616,6 +616,28 @@ async function buildPerceptionPrompt(
       if (s.exit_conditions) lines.push(`  exit if: ${s.exit_conditions.slice(0, 200)}`);
       if (s.rationale) lines.push(`  rationale: ${s.rationale.slice(0, 200)}`);
       lines.push(whatIfLine);
+
+      // ── RE-ENTRY AWARENESS ────────────────────────────────────────────
+      // Check if we already traded this ticker today and warn the agent
+      // about re-entering after a win. Prevents buying back near the exit
+      // price after a pullback from a big gain.
+      const todayTrades = state.getTradesForDay(getTradingDate());
+      const priorTrades = todayTrades.filter(t => t.symbol === s.ticker);
+      if (priorTrades.length > 0) {
+        const totalPnl = priorTrades.reduce((sum, t) => sum + t.pnl, 0);
+        const totalPnlPct = priorTrades.reduce((sum, t) => sum + t.pnlPct, 0);
+        const bestExit = Math.max(...priorTrades.map(t => t.exitPrice));
+        const worstEntry = Math.min(...priorTrades.map(t => t.entryPrice));
+        const peakFromEntry = ((bestExit - worstEntry) / worstEntry * 100);
+
+        lines.push(`  ⚠️  RE-ENTRY WARNING — Already traded ${s.ticker} ${priorTrades.length}x today`);
+        lines.push(`     Result: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(2)}%)`);
+        lines.push(`     Prior range: entry $${worstEntry.toFixed(2)} → exit $${bestExit.toFixed(2)} (${peakFromEntry >= 0 ? "+" : ""}${peakFromEntry.toFixed(1)}% move)`);
+        lines.push(`     ⚠️  Re-entering means buying after the stock already ran and pulled back.`);
+        lines.push(`     Only enter if the strategist confirms fresh catalysts (not stale signals).`);
+        lines.push(`     Prefer a DIFFERENT candidate — let this one cool off.`);
+      }
+
       // Append remaining price action lines (skip the original "TICKER:" header)
       lines.push(...priceLines.slice(2));
     }

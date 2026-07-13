@@ -326,9 +326,26 @@ async function ingestRedditMentions(store: SignalStore): Promise<void> {
 /**
  * Wire volume standouts.
  */
+/**
+ * Build a price map from the research DB for the given tickers.
+ * Uses SignalStore.getLatestPrice() which reads from signal payloads
+ * (gap/range_break have real-time prices) and falls back to technical_indicators.
+ * Returns a Map or undefined if no prices found.
+ */
+function buildPriceMap(store: SignalStore, tickers: string[]): Map<string, number> | undefined {
+  const map = new Map<string, number>();
+  for (const sym of tickers) {
+    const p = store.getLatestPrice(sym);
+    if (p !== null) map.set(sym, p);
+  }
+  return map.size > 0 ? map : undefined;
+}
+
 async function ingestVolumeScans(store: SignalStore): Promise<void> {
   try {
-    const scans = await scanRelativeVolume(getScanTickers());
+    const tickers = getScanTickers();
+    const priceMap = buildPriceMap(store, tickers);
+    const scans = await scanRelativeVolume(tickers, priceMap);
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const s of scans) {
@@ -354,7 +371,9 @@ async function ingestVolumeScans(store: SignalStore): Promise<void> {
  */
 async function ingestPreMarketGaps(store: SignalStore): Promise<void> {
   try {
-    const gaps = await scanPreMarketGaps(getScanTickers());
+    const tickers = getScanTickers();
+    const priceMap = buildPriceMap(store, tickers);
+    const gaps = await scanPreMarketGaps(tickers, priceMap);
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const g of gaps) {
@@ -380,7 +399,9 @@ async function ingestPreMarketGaps(store: SignalStore): Promise<void> {
  */
 async function ingestRangeBreaks(store: SignalStore): Promise<void> {
   try {
-    const breaks = await scanRangeBreaks(getScanTickers());
+    const tickers = getScanTickers();
+    const priceMap = buildPriceMap(store, tickers);
+    const breaks = await scanRangeBreaks(tickers, priceMap);
     const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
 
     for (const b of breaks) {

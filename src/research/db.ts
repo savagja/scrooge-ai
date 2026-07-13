@@ -797,6 +797,55 @@ export class SignalStore {
    * Get the latest technical indicators for a symbol.
    * Returns null if none found.
    */
+  /**
+   * Get the latest real-time price for a symbol from the research DB.
+   * Checks gap and range_break signal payloads first (these have real-time prices
+   * written by the research scanner every ~30s), then falls back to the
+   * SMA-20 close from technical_indicators (may be yesterday's close).
+   *
+   * Returns null if no price data is available at all.
+   */
+  getLatestPrice(symbol: string): number | null {
+    const db = this.assertReady();
+    const sym = symbol.toUpperCase();
+
+    // 1) Try the most recent gap signal payload (has real-time price)
+    const gapRes = db.prepare(`
+      SELECT payload FROM signals
+      WHERE ticker = ? AND source IN ('gap', 'range_break')
+        AND payload IS NOT NULL
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(sym) as { payload: string } | undefined;
+    if (gapRes?.payload) {
+      try {
+        const p = JSON.parse(gapRes.payload);
+        if (typeof p.price === 'number') return p.price;
+      } catch { /* bad json, fall through */ }
+    }
+
+    // 2) Fall back to the priorClose in gap signal payloads
+    const gapFallback = db.prepare(`
+      SELECT payload FROM signals
+      WHERE ticker = ? AND source = 'gap' AND payload IS NOT NULL
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(sym) as { payload: string } | undefined;
+    if (gapFallback?.payload) {
+      try {
+        const p = JSON.parse(gapFallback.payload);
+        if (typeof p.priorClose === 'number') return p.priorClose;
+      } catch { /* bad json, fall through */ }
+    }
+
+    // 3) Fall back to SMA-20 from technical_indicators (yesterday's close)
+    const ti = db.prepare(`
+      SELECT sma_20 FROM technical_indicators
+      WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1
+    `).get(sym) as { sma_20: number } | undefined;
+    if (ti?.sma_20 !== null && ti?.sma_20 !== undefined) return Number(ti.sma_20);
+
+    return null;
+  }
+
   getLatestTechnicalIndicators(symbol: string): Record<string, unknown> | null {
     const db = this.assertReady();
     const result = db.prepare(`SELECT * FROM technical_indicators WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`).all(symbol.toUpperCase());
