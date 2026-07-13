@@ -7,8 +7,8 @@
  * No LLM involvement in data collection, aggregation, or storage.
  */
 
-import initSqlJs, { type Database, type SqlValue } from "sql.js";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import Database from "better-sqlite3";
+import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import crypto from "crypto";
 
@@ -279,10 +279,8 @@ const RETENTION_DAILY_MS = 365 * 86400_000;
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class SignalStore {
-  private db: Database | null = null;
+  private db: InstanceType<typeof Database> | null = null;
   private dbPath: string;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private dirty = false;
   private initDone = false;
   private meta: Record<string, string> = {};
 
@@ -303,69 +301,67 @@ export class SignalStore {
   // ── LIFECYCLE ─────────────────────────────────────────────────────────
 
   async init(): Promise<void> {
-    const SQL = await initSqlJs();
     mkdirSync(dirname(this.dbPath), { recursive: true });
 
-    if (existsSync(this.dbPath)) {
-      this.db = new SQL.Database(readFileSync(this.dbPath));
-    } else {
-      this.db = new SQL.Database();
-    }
+    this.db = new Database(this.dbPath);
+
+    // Enable WAL mode for better concurrent read performance
+    this.db.pragma("journal_mode = WAL");
 
     for (const sql of SCHEMA_SQL) {
-      this.db.run(sql);
+      this.db.exec(sql);
     }
 
-    // Persist empty schema to disk
-    this.flush();
     this.initDone = true;
 
     // Load internal metadata from _internal table
-    const metaResult = this.db.exec(`SELECT key, value FROM _internal`);
-    if (metaResult.length > 0) {
-      for (const row of metaResult[0].values) {
-        this.meta[String(row[0])] = String(row[1]);
-      }
+    const rows = this.db.prepare("SELECT key, value FROM _internal").all() as { key: string; value: string }[];
+    for (const row of rows) {
+      this.meta[row.key] = row.value;
     }
   }
 
+  /**
+   * Flush is a no-op with better-sqlite3 — the database lives on disk,
+   * every write is immediately durable (or WAL-buffered). No export() needed.
+   * Retained for API compatibility.
+   */
   flush(): void {
-    if (!this.db) return;
-    const data = this.db.export();
-    writeFileSync(this.dbPath, Buffer.from(data));
-    this.dirty = false;
+    // No-op: better-sqlite3 writes to disk natively
   }
 
   private _save(): void {
-    this.dirty = true;
-    if (this.saveTimer) return;
-    this.saveTimer = setTimeout(() => {
-      this.flush();
-      this.saveTimer = null;
-    }, 2000);
+    // No-op: better-sqlite3 writes are immediate
   }
 
   close(): void {
-    if (this.saveTimer) clearTimeout(this.saveTimer);
-    this.flush();
-    this.db?.close();
+    // Cleanly checkpoint WAL before closing
+    if (this.db) {
+      try { this.db.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* ok */ }
+      this.db.close();
+    }
     this.db = null;
   }
 
-  private assertReady(): Database {
+  private assertReady(): InstanceType<typeof Database> {
     if (!this.db || !this.initDone) throw new Error("SignalStore not initialized. Call init() first.");
     return this.db;
   }
 
   /**
    * Execute arbitrary SQL and return results as objects.
-   * Used by macro.ts for earnings tag queries.
+   * Used by macro.ts, ingestion.ts for ad-hoc queries.
    */
   _execSql(sql: string, params?: any[]): Record<string, unknown>[] {
     const db = this.assertReady();
-    const result = db.exec(sql, params);
-    if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const stmt = db.prepare(sql);
+    const rows = params ? stmt.all(...params) : stmt.all();
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const columns = Object.keys(rows[0] as Record<string, unknown>);
+    return rowsToObjects(
+      columns,
+      rows.map((row: any) => columns.map((col: string) => row[col]))
+    );
   }
 
   // ── TICKERS ─────────────────────────────────────────────────────────────
@@ -375,17 +371,11 @@ export class SignalStore {
     const sym = symbol.toUpperCase();
     const now = new Date().toISOString();
 
-    const existing = db.exec(`SELECT symbol FROM tickers WHERE symbol = ?`, [sym]);
-    if (existing.length > 0 && existing[0].values.length > 0) {
-      db.run(
-        `UPDATE tickers SET last_seen = ?, sector = COALESCE(?, sector), industry = COALESCE(?, industry), name = COALESCE(?, name) WHERE symbol = ?`,
-        [now, sector ?? null, industry ?? null, name ?? null, sym]
-      );
+    const existing = db.prepare(`SELECT symbol FROM tickers WHERE symbol = ?`).all(sym);
+    if (existing.length > 0 && existing.length > 0) {
+      db.prepare(`UPDATE tickers SET last_seen = ?, sector = COALESCE(?, sector), industry = COALESCE(?, industry), name = COALESCE(?, name) WHERE symbol = ?`).run(now, sector ?? null, industry ?? null, name ?? null, sym);
     } else {
-      db.run(
-        `INSERT INTO tickers (symbol, name, sector, industry, first_seen, last_seen, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`,
-        [sym, name ?? null, sector ?? null, industry ?? null, now, now]
-      );
+      db.prepare(`INSERT INTO tickers (symbol, name, sector, industry, first_seen, last_seen, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`).run(sym, name ?? null, sector ?? null, industry ?? null, now, now);
     }
     this._save();
   }
@@ -417,27 +407,21 @@ export class SignalStore {
       const id = uuid();
       const payloadStr = s.payload ? JSON.stringify(s.payload) : null;
 
-      db.run(
-        `INSERT INTO signals (id, ticker, timestamp, source, score, direction, payload) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, sym, now, s.source, s.score, s.direction, payloadStr]
-      );
+      db.prepare(`INSERT INTO signals (id, ticker, timestamp, source, score, direction, payload) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, sym, now, s.source, s.score, s.direction, payloadStr);
 
       // Update hourly aggregate
       const hb = hourBucket(now);
       const isBullish = s.direction > 0 ? 1 : 0;
       const isBearish = s.direction < 0 ? 1 : 0;
-      db.run(
-        `INSERT INTO signal_hourly (ticker, source, bucket_hour, event_count, avg_score, max_score, bullish_ct, bearish_ct)
+      db.prepare(`INSERT INTO signal_hourly (ticker, source, bucket_hour, event_count, avg_score, max_score, bullish_ct, bearish_ct)
          VALUES (?, ?, ?, 1, ?, ?, ?, ?)
          ON CONFLICT(ticker, source, bucket_hour) DO UPDATE SET
            event_count = event_count + 1,
            avg_score = (avg_score * (event_count - 1) + ?) / event_count,
            max_score = MAX(max_score, ?),
            bullish_ct = bullish_ct + ?,
-           bearish_ct = bearish_ct + ?`,
-        [sym, s.source, hb, s.score, s.score, isBullish, isBearish,
-         s.score, s.score, isBullish, isBearish]
-      );
+           bearish_ct = bearish_ct + ?`).run(sym, s.source, hb, s.score, s.score, isBullish, isBearish,
+         s.score, s.score, isBullish, isBearish);
 
       this.ensureTicker(sym);
     }
@@ -483,12 +467,16 @@ export class SignalStore {
     sql += ` LIMIT ?`;
     params.push(limit);
 
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
-  private _searchHourly(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
+  private _searchHourly(db: InstanceType<typeof Database>, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
     let sql = `SELECT * FROM signal_hourly WHERE bucket_hour >= ?`;
     const params: any[] = [since.slice(0, 16) + ":00"];
 
@@ -508,12 +496,16 @@ export class SignalStore {
     sql += ` ORDER BY ${query.sortBy === "time" ? "bucket_hour DESC" : "max_score DESC"} LIMIT ?`;
     params.push(limit);
 
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
-  private _searchDaily(db: Database, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
+  private _searchDaily(db: InstanceType<typeof Database>, since: string, query: SignalQuery, limit: number): Record<string, unknown>[] {
     let sql = `SELECT * FROM signal_daily WHERE bucket_date >= ?`;
     const params: any[] = [since.slice(0, 10)];
 
@@ -533,9 +525,13 @@ export class SignalStore {
     sql += ` ORDER BY ${query.sortBy === "time" ? "bucket_date DESC" : "max_score DESC"} LIMIT ?`;
     params.push(limit);
 
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
   // ── CROSS-SOURCE CLUSTERS ───────────────────────────────────────────────
@@ -548,8 +544,7 @@ export class SignalStore {
     const db = this.assertReady();
     const since = new Date(Date.now() - sinceMinutes * 60000).toISOString();
 
-    const result = db.exec(
-      `SELECT ticker, COUNT(DISTINCT source) AS source_count,
+    const result = db.prepare(`SELECT ticker, COUNT(DISTINCT source) AS source_count,
               AVG(score) AS avg_score, SUM(CASE WHEN direction > 0 THEN 1 ELSE 0 END) AS bullish_total,
               SUM(CASE WHEN direction < 0 THEN 1 ELSE 0 END) AS bearish_total,
               COUNT(*) AS total_signals
@@ -558,12 +553,14 @@ export class SignalStore {
        GROUP BY ticker
        HAVING source_count >= ?
        ORDER BY source_count DESC, avg_score DESC
-       LIMIT 50`,
-      [since, minSources]
-    );
+       LIMIT 50`).all(since, minSources);
 
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols1 = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols1,
+      (result as any[]).map((r: any) => cols1.map((c: string) => r[c]))
+    );
   }
 
   // ── SECTOR SIGNALS ──────────────────────────────────────────────────────
@@ -582,12 +579,9 @@ export class SignalStore {
   }): void {
     const db = this.assertReady();
     const id = uuid();
-    db.run(
-      `INSERT INTO sector_signals (id, sector, source, timestamp, headline, score, direction, impact)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, params.sector, params.source, new Date().toISOString(), params.headline,
-       params.score ?? 0.5, params.direction ?? 0, params.impact ?? "medium"]
-    );
+    db.prepare(`INSERT INTO sector_signals (id, sector, source, timestamp, headline, score, direction, impact)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, params.sector, params.source, new Date().toISOString(), params.headline,
+       params.score ?? 0.5, params.direction ?? 0, params.impact ?? "medium");
     this._save();
   }
 
@@ -602,9 +596,13 @@ export class SignalStore {
     }
     if (impact) { sql += ` AND impact = ?`; params.push(impact); }
     sql += ` ORDER BY timestamp DESC LIMIT 100`;
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
   // ── MACRO EVENTS ────────────────────────────────────────────────────────
@@ -617,12 +615,9 @@ export class SignalStore {
   }): void {
     const db = this.assertReady();
     const id = uuid();
-    db.run(
-      `INSERT INTO macro_events (id, event_type, headline, timestamp, source, impact, payload)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, params.eventType, params.headline, new Date().toISOString(), "macro_calendar",
-       params.impact ?? "medium", params.payload ? JSON.stringify(params.payload) : null]
-    );
+    db.prepare(`INSERT INTO macro_events (id, event_type, headline, timestamp, source, impact, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, params.eventType, params.headline, new Date().toISOString(), "macro_calendar",
+       params.impact ?? "medium", params.payload ? JSON.stringify(params.payload) : null);
     this._save();
   }
 
@@ -636,9 +631,13 @@ export class SignalStore {
       params.push(new Date(Date.now() - sinceMinutes * 60000).toISOString());
     }
     sql += ` ORDER BY timestamp DESC LIMIT 50`;
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
   /** Get latest sector rotation data (which sectors are hot/cold). */
@@ -646,8 +645,7 @@ export class SignalStore {
     const db = this.assertReady();
     const since = new Date(Date.now() - (sinceMinutes ?? 1440) * 60000).toISOString();
     // Returns aggregate of sector signals grouped by sector, ordered by volume of activity
-    const result = db.exec(
-      `SELECT sector, COUNT(*) AS signal_count,
+    const result = db.prepare(`SELECT sector, COUNT(*) AS signal_count,
               AVG(score) AS avg_score,
               SUM(CASE WHEN direction > 0 THEN 1 ELSE 0 END) AS bullish,
               SUM(CASE WHEN direction < 0 THEN 1 ELSE 0 END) AS bearish
@@ -655,11 +653,13 @@ export class SignalStore {
        WHERE timestamp >= ?
        GROUP BY sector
        ORDER BY signal_count DESC
-       LIMIT 30`,
-      [since]
-    );
+       LIMIT 30`).all(since);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols2 = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols2,
+      (result as any[]).map((r: any) => cols2.map((c: string) => r[c]))
+    );
   }
 
   upsertFundamentals(ticker: string, asOfDate: string, source: string, data: Record<string, unknown>): void {
@@ -671,13 +671,12 @@ export class SignalStore {
     const setClauses = columns.map((c) => `${c} = COALESCE(?, ${c})`);
     const placeholders = columns.map(() => "?").join(", ");
 
-    db.run(
+    db.prepare(
       `INSERT INTO fundamentals (ticker, as_of_date, source, ${columns.join(", ")})
        VALUES (?, ?, ?, ${placeholders})
        ON CONFLICT(ticker, as_of_date, source) DO UPDATE SET
-         ${setClauses.join(", ")}`,
-      [sym, asOfDate, source, ...values] as any
-    );
+         ${setClauses.join(", ")}`
+    ).run(sym, asOfDate, source, ...values);
     this.ensureTicker(sym);
     this._save();
   }
@@ -695,9 +694,9 @@ export class SignalStore {
       params = [sym];
     }
 
-    const result = db.exec(sql, params);
-    if (result.length === 0 || result[0].values.length === 0) return null;
-    return rowsToObjects(result[0].columns, [result[0].values[0]])[0];
+    const result = db.prepare(sql).all(...params);
+    if (result.length === 0) return null;
+    return result[0] as Record<string, unknown>;
   }
 
   // ── CORPORATE EVENTS ───────────────────────────────────────────────────
@@ -712,10 +711,8 @@ export class SignalStore {
   }): void {
     const db = this.assertReady();
     const id = uuid();
-    db.run(
-      `INSERT INTO corporate_events (id, ticker, event_date, event_type, impact, details, source_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
+    db.prepare(`INSERT INTO corporate_events (id, ticker, event_date, event_type, impact, details, source_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
         id,
         params.ticker.toUpperCase(),
         params.eventDate,
@@ -723,8 +720,7 @@ export class SignalStore {
         params.impact ?? null,
         params.details ? JSON.stringify(params.details) : null,
         params.sourceUrl ?? null,
-      ]
-    );
+      );
     this.ensureTicker(params.ticker.toUpperCase());
     this._save();
   }
@@ -748,9 +744,13 @@ export class SignalStore {
 
     sql += ` ORDER BY event_date DESC LIMIT 50`;
 
-    const result = db.exec(sql, params);
+        const result = db.prepare(sql).all(...params);
     if (result.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
   // ── TECHNICAL INDICATORS ───────────────────────────────────────────────
@@ -779,20 +779,17 @@ export class SignalStore {
     const placeholders = fields.map(() => "?").join(", ");
     const updates = fields.map((f) => `${f} = COALESCE(?, ${f})`).join(", ");
 
-    const values: SqlValue[] = fields.map((f) => {
+    const values: any[] = fields.map((f) => {
       const v = indicators[f];
       if (v === null || v === undefined) return null;
       if (typeof v === "boolean") return v ? 1 : 0;
-      return v as SqlValue;
+      return v as any;
     });
 
-    db.run(
-      `INSERT INTO technical_indicators (symbol, timestamp, ${cols})
+    db.prepare(`INSERT INTO technical_indicators (symbol, timestamp, ${cols})
        VALUES (?, ?, ${placeholders})
        ON CONFLICT(symbol, timestamp) DO UPDATE SET
-         ${updates}`,
-      [sym, String(indicators.timestamp ?? ""), ...values]
-    );
+         ${updates}`).run(sym, String(indicators.timestamp ?? ""), ...values);
     this._save();
   }
 
@@ -802,12 +799,9 @@ export class SignalStore {
    */
   getLatestTechnicalIndicators(symbol: string): Record<string, unknown> | null {
     const db = this.assertReady();
-    const result = db.exec(
-      `SELECT * FROM technical_indicators WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`,
-      [symbol.toUpperCase()]
-    );
-    if (result.length === 0 || result[0].values.length === 0) return null;
-    return rowsToObjects(result[0].columns, [result[0].values[0]])[0];
+    const result = db.prepare(`SELECT * FROM technical_indicators WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`).all(symbol.toUpperCase());
+    if (result.length === 0 || result.length === 0) return null;
+    return result[0] as Record<string, unknown>;
   }
 
   /**
@@ -829,7 +823,7 @@ export class SignalStore {
   }): Record<string, unknown>[] {
     const db = this.assertReady();
     const conditions: string[] = [];
-    const bindings: SqlValue[] = [];;
+    const bindings: any[] = [];;
 
     if (params.minRsi !== undefined) {
       conditions.push("rsi_14 >= ?");
@@ -883,9 +877,13 @@ export class SignalStore {
       LIMIT ?
     `;
 
-    const result = db.exec(sql, [...bindings, limit]);
-    if (result.length === 0 || result[0].values.length === 0) return [];
-    return rowsToObjects(result[0].columns, result[0].values);
+    const result = db.prepare(sql).all(...bindings, limit);
+    if (result.length === 0) return [];
+    const cols = Object.keys(result[0] as Record<string, unknown>);
+    return rowsToObjects(
+      cols,
+      (result as any[]).map((r: any) => cols.map((c: string) => r[c]))
+    );
   }
 
   // ── PRUNING ────────────────────────────────────────────────────────────
@@ -906,24 +904,20 @@ export class SignalStore {
     let dailyDeleted = 0;
 
     // Fold raw signals > 14 days into daily aggregates, then delete
-    const staleRaw = db.exec(
-      `SELECT ticker, source, timestamp, score, direction FROM signals WHERE timestamp < ?`,
-      [rawCutoff]
-    );
+    const staleRaw = db.prepare(`SELECT ticker, source, timestamp, score, direction FROM signals WHERE timestamp < ?`).all(rawCutoff) as any[];
 
     if (staleRaw.length > 0) {
-      for (const row of staleRaw[0].values) {
-        const ticker = String(row[0]);
-        const source = String(row[1]);
-        const ts = String(row[2]);
-        const score = Number(row[3]);
-        const direction = Number(row[4]);
+      for (const row of staleRaw) {
+        const ticker = String(row.ticker);
+        const source = String(row.source);
+        const ts = String(row.timestamp);
+        const score = Number(row.score);
+        const direction = Number(row.direction);
         const bd = dateBucket(ts);
         const isBull = direction > 0 ? 1 : 0;
         const isBear = direction < 0 ? 1 : 0;
 
-        db.run(
-          `INSERT INTO signal_daily (ticker, source, bucket_date, event_count, avg_score, max_score, bullish_ct, bearish_ct, source_ct)
+        db.prepare(`INSERT INTO signal_daily (ticker, source, bucket_date, event_count, avg_score, max_score, bullish_ct, bearish_ct, source_ct)
            VALUES (?, ?, ?, 1, ?, ?, ?, ?, 1)
            ON CONFLICT(ticker, source, bucket_date) DO UPDATE SET
              event_count = event_count + 1,
@@ -931,27 +925,25 @@ export class SignalStore {
              max_score = MAX(max_score, ?),
              bullish_ct = bullish_ct + ?,
              bearish_ct = bearish_ct + ?,
-             source_ct = source_ct + 1`,
-          [ticker, source, bd, score, score, isBull, isBear, score, score, isBull, isBear]
-        );
+             source_ct = source_ct + 1`).run(ticker, source, bd, score, score, isBull, isBear, score, score, isBull, isBear);
       }
 
-      db.run(`DELETE FROM signals WHERE timestamp < ?`, [rawCutoff]);
-      rawDeleted = staleRaw[0].values.length;
+      db.prepare(`DELETE FROM signals WHERE timestamp < ?`).run(rawCutoff);
+      rawDeleted = staleRaw.length;
     }
 
     // Delete stale hourly
-    const hrResult = db.exec(`SELECT COUNT(*) AS c FROM signal_hourly WHERE bucket_hour < ?`, [hourlyCutoff]);
-    if (hrResult.length > 0 && hrResult[0].values.length > 0) {
-      hourlyDeleted = Number(hrResult[0].values[0][0]);
-      db.run(`DELETE FROM signal_hourly WHERE bucket_hour < ?`, [hourlyCutoff]);
+    const hrResult = db.prepare(`SELECT COUNT(*) AS c FROM signal_hourly WHERE bucket_hour < ?`).all(hourlyCutoff);
+    if (hrResult.length > 0) {
+      hourlyDeleted = Number((hrResult[0] as any).c);
+      db.prepare(`DELETE FROM signal_hourly WHERE bucket_hour < ?`).run(hourlyCutoff);
     }
 
     // Delete stale daily
-    const drResult = db.exec(`SELECT COUNT(*) AS c FROM signal_daily WHERE bucket_date < ?`, [dailyCutoff]);
-    if (drResult.length > 0 && drResult[0].values.length > 0) {
-      dailyDeleted = Number(drResult[0].values[0][0]);
-      db.run(`DELETE FROM signal_daily WHERE bucket_date < ?`, [dailyCutoff]);
+    const drResult = db.prepare(`SELECT COUNT(*) AS c FROM signal_daily WHERE bucket_date < ?`).all(dailyCutoff);
+    if (drResult.length > 0) {
+      dailyDeleted = Number((drResult[0] as any).c);
+      db.prepare(`DELETE FROM signal_daily WHERE bucket_date < ?`).run(dailyCutoff);
     }
 
     this._save();
@@ -966,13 +958,13 @@ export class SignalStore {
     const info: TableInfo[] = [];
 
     for (const name of tables) {
-      const colResult = db.exec(`PRAGMA table_info(${name})`);
+      const colResult = db.prepare(`PRAGMA table_info(${name})`).all() as any[];
       const columns = colResult.length > 0
-        ? colResult[0].values.map((r) => ({ name: String(r[1]), type: String(r[2]) }))
+        ? colResult.map((r: any) => ({ name: String(r.name), type: String(r.type) }))
         : [];
 
-      const countResult = db.exec(`SELECT COUNT(*) AS c FROM ${name}`);
-      const rowCount = countResult.length > 0 ? Number(countResult[0].values[0][0]) : 0;
+      const countResult = db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).all() as any[];
+      const rowCount = countResult.length > 0 ? Number(countResult[0].c) : 0;
 
       info.push({ name, rowCount, columns });
     }
@@ -995,11 +987,11 @@ export class SignalStore {
     ];
 
     for (const [table, col] of queries) {
-      const result = db.exec(`SELECT MIN(${col}), MAX(${col}) FROM ${table}`);
-      if (result.length > 0 && result[0].values.length > 0) {
+      const result = db.prepare(`SELECT MIN(${col}) as min_val, MAX(${col}) as max_val FROM ${table}`).all() as any[];
+      if (result.length > 0) {
         ranges[table] = {
-          min: result[0].values[0][0] ? String(result[0].values[0][0]) : null,
-          max: result[0].values[0][1] ? String(result[0].values[0][1]) : null,
+          min: result[0].min_val ? String(result[0].min_val) : null,
+          max: result[0].max_val ? String(result[0].max_val) : null,
         };
       } else {
         ranges[table] = { min: null, max: null };
@@ -1011,12 +1003,10 @@ export class SignalStore {
 
   getSourceBreakdown(): Record<string, number> {
     const db = this.assertReady();
-    const result = db.exec(`SELECT source, COUNT(*) AS c FROM signals GROUP BY source ORDER BY c DESC`);
+    const result = db.prepare(`SELECT source, COUNT(*) AS c FROM signals GROUP BY source ORDER BY c DESC`).all() as any[];
     const breakdown: Record<string, number> = {};
-    if (result.length > 0) {
-      for (const row of result[0].values) {
-        breakdown[String(row[0])] = Number(row[1]);
-      }
+    for (const row of result) {
+      breakdown[String(row.source)] = Number(row.c);
     }
     return breakdown;
   }
