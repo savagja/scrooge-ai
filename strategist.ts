@@ -45,130 +45,64 @@ async function generateStrategistReport(
   const lines: string[] = [];
 
   // ── Header ─────────────────────────────────────────────────────────────
-  lines.push("# 🧠 Strategist Report");
+  lines.push("# 🧠 Strategist Briefing");
   lines.push("");
-  lines.push(`**Generated:** ${now}`);
-  lines.push(`**Session:** ${sessionType === "pre-market" ? "Pre-Market" : "Mid-Session"}`);
-  lines.push(`**Market:** ${clock.isOpen ? "OPEN" : "CLOSED"}`);
-  if (clock.isOpen) {
-    lines.push(`**Closes:** ${clock.nextClose}`);
-  } else {
-    lines.push(`**Opens:** ${clock.nextOpen}`);
-  }
+  lines.push(`Generated: ${now}`);
+  lines.push(`Session: ${sessionType === "pre-market" ? "Pre-Market" : "Mid-Session"}`);
   lines.push("");
 
-  // ── Market Summary ─────────────────────────────────────────────────────
-  lines.push("## 📊 Market Summary");
-  lines.push("");
-  lines.push("| Measure | Value |");
-  lines.push("|---------|-------|");
-
-  // Get VIX and SPY from market data functions
-  let vix: string = "unknown";
-  let spyChange: string = "unknown";
-  let regime: string = "unknown";
-  try {
-    const vixVal = await getVix();
-    if (vixVal !== null) vix = vixVal.toFixed(2);
-    const spyVal = await getSpyChange();
-    if (spyVal !== null) spyChange = spyVal.toFixed(2);
-    // Infer regime from VIX (simple heuristic for the report)
-    const vixNum = parseFloat(vix);
-    if (!isNaN(vixNum)) {
-      if (vixNum < 14) regime = "trending_up (low volatility)";
-      else if (vixNum < 20) regime = "normal";
-      else if (vixNum < 30) regime = "elevated (cautious)";
-      else regime = "high volatility (defensive)";
+  // ── Brief: What changed (lifecycle actions) ────────────────────────────
+  // Extract lifecycle actions from the strategist's own output
+  const lifecycleActions = extractLifecycleActions(strategistOutput);
+  if (lifecycleActions.length > 0) {
+    lines.push("## 🔄 What Changed");
+    lines.push("");
+    for (const action of lifecycleActions) {
+      lines.push(`- ${action}`);
     }
-  } catch { /* fall through with defaults */ }
-
-  lines.push(`| VIX | ${vix} |`);
-  lines.push(`| SPY Change | ${spyChange}% |`);
-  lines.push(`| Market Regime | ${regime} |`);
-  lines.push("");
-
-  // ── Strategy Overview ──────────────────────────────────────────────────
-  lines.push("## 📋 Strategy Overview");
-  lines.push("");
-  const counts = strategies.getStateCounts();
-  const total = strategies.getTotalCount();
-  lines.push(`**Total strategies:** ${total}`);
-  lines.push("");
-  lines.push("| State | Count |");
-  lines.push("|-------|-------|");
-  if (counts.anticipated) lines.push(`| Anticipated | ${counts.anticipated} |`);
-  if (counts.developing) lines.push(`| Developing | ${counts.developing} |`);
-  if (counts.active) lines.push(`| Active (in position) | ${counts.active} |`);
-  if (counts.realized) lines.push(`| Realized | ${counts.realized} |`);
-  if (counts.failed) lines.push(`| Failed | ${counts.failed} |`);
-  if (counts.stale) lines.push(`| Stale | ${counts.stale} |`);
-  lines.push("");
-
-  // ── Top Strategies ─────────────────────────────────────────────────────
-  const top = strategies.getTopStrategies(20); // grab extra for selection
-  const topDisplay = top.slice(0, 10); // show at most 10
-
-  lines.push("## 🏆 Top Strategies for Trader");
-  lines.push("");
-
-  if (topDisplay.length === 0) {
-    lines.push("No strategies ready for execution yet. The strategist is still analyzing the market.");
     lines.push("");
-  } else {
-    // Explain the ranking
-    lines.push("Strategies are ranked by: developing > anticipated, then high > medium > low conviction, then confidence score, then most recently updated.");
-    lines.push("A strategy in `developing` state has 2+ converging signals. `anticipated` means a single interesting sighting.");
+  }
+
+  // ── Brief: Market observations (only what the structured data can't express) ──
+  const observations = extractMarketObservations(strategistOutput);
+  if (observations) {
+    lines.push("## 👁️ Market Observations");
     lines.push("");
+    lines.push(observations);
+    lines.push("");
+  }
 
-    for (let i = 0; i < topDisplay.length; i++) {
-      const s = topDisplay[i];
-      const rank = i + 1;
-
-      // Build why-this-is-at-top explanation
-      const reasons: string[] = [];
-      if (s.state === "developing") reasons.push("Multiple converging signals");
-      if (s.conviction === "high") reasons.push("High conviction");
-      if (s.confidence >= 0.5) reasons.push(`Confidence ${(s.confidence * 100).toFixed(0)}%`);
-      if (rank === 1) reasons.push("Top-ranked by conviction × confidence");
-
-      lines.push(`### ${rank}. ${s.ticker} — ${s.direction?.toUpperCase() ?? "?"} ${s.strategy_type}`);
-      lines.push("");
-      lines.push(`**State:** ${s.state} | **Conviction:** ${s.conviction} | **Confidence:** ${(s.confidence * 100).toFixed(0)}%`);
-      lines.push("");
-      lines.push(`**Thesis:** ${s.thesis}`);
-      if (s.catalyst) lines.push(`**Catalyst:** ${s.catalyst}`);
-      if (s.timeframe) lines.push(`**Timeframe:** ${s.timeframe}`);
-      if (s.rationale) lines.push(`**Rationale:** ${s.rationale.slice(0, 300)}`);
-      if (s.key_signals && (s.key_signals as string[]).length > 0)
-        lines.push(`**Key Signals:** ${(s.key_signals as string[]).join(", ")}`);
-      if (s.entry_conditions) lines.push(`**Entry Conditions:** ${s.entry_conditions}`);
-      if (s.exit_conditions) lines.push(`**Exit Conditions:** ${s.exit_conditions}`);
-      lines.push("");
-
-      // What-If historical grade
-      if (s.what_if) {
-        const emoji = s.what_if.grade >= 4 ? "✅" : s.what_if.grade <= 2 ? "❌" : "➖";
-        const pnlStr = s.what_if.potentialGainLoss >= 0
-          ? `+$${s.what_if.potentialGainLoss.toFixed(2)}`
-          : `-$${Math.abs(s.what_if.potentialGainLoss).toFixed(2)}`;
-        lines.push(`**Historical Grade:** ${emoji} ${s.what_if.grade}/5 — ${pnlStr} (${s.what_if.potentialGainLossPct >= 0 ? "+" : ""}${s.what_if.potentialGainLossPct.toFixed(1)}%) | ${s.what_if.abstraction}`);
-        lines.push("");
-      } else {
-        lines.push("**Historical Grade:** No prior trades — new setup.");
+  // ── Brief: Strategist's conclusions per strategy ───────────────────────
+  // Just the per-strategy narrative commentary, not the fields that are in the DB
+  const strategyNotes = extractStrategyCommentary(strategistOutput);
+  if (strategyNotes.size > 0) {
+    lines.push("## 📝 Strategist Notes");
+    lines.push("");
+    lines.push("Key points the strategist wants you to know about these strategies:");
+    lines.push("");
+    for (const [ticker, note] of strategyNotes) {
+      if (note) {
+        lines.push(`**${ticker}:** ${note}`);
         lines.push("");
       }
-
-      // Why this rank
-      lines.push(`**Why #${rank}:** ${reasons.join(". ")}.`);
-      lines.push("");
-      lines.push("---");
-      lines.push("");
     }
   }
 
-  // ── Strategist Commentary ──────────────────────────────────────────────
-  if (strategistOutput.trim()) {
-    lines.push("## 💬 Strategist Analysis");
+  // ── Brief: Warnings / cross-currents ───────────────────────────────────
+  const warnings = extractWarnings(strategistOutput);
+  if (warnings.length > 0) {
+    lines.push("## ⚠️ Warnings & Cross-Currents");
+    lines.push("");
+    for (const w of warnings) {
+      lines.push(`- ${w}`);
+    }
+    lines.push("");
+  }
+
+  // ── Fallback: If extraction produced nothing, include raw output ────────
+  const hasExtractedContent = lifecycleActions.length > 0 || observations || strategyNotes.size > 0 || warnings.length > 0;
+  if (!hasExtractedContent && strategistOutput.trim()) {
+    lines.push("## 📝 Strategist's Analysis");
     lines.push("");
     lines.push("```");
     lines.push(strategistOutput.trim());
@@ -176,12 +110,161 @@ async function generateStrategistReport(
     lines.push("");
   }
 
+  // ── Check if there are any strategies at all ───────────────────────────
+  const total = strategies.getTotalCount();
+  if (total === 0) {
+    lines.push("## ℹ️ No Active Strategies");
+    lines.push("");
+    lines.push("The strategist hasn't created any strategies yet. This is normal on first run or during quiet market periods. The trader should focus on managing existing positions and holding cash.");
+    lines.push("");
+  }
+
   // ── Footer ─────────────────────────────────────────────────────────────
   lines.push("---");
-  lines.push(`_Report auto-generated by Scrooge Strategist at ${now}_`);
+  lines.push("The structured strategy data (thesis, catalyst, entry/exit conditions, historical grades) is available in the CANDIDATE STRATEGIES section above. This briefing only contains what the structured data can't express: market observations, lifecycle actions, and per-strategy narrative notes.");
+  lines.push("");
+  lines.push(`_Auto-generated by Scrooge Strategist at ${now}_`);
   lines.push("");
 
   return lines.join("\n");
+}
+
+/**
+ * Extract lifecycle actions from the strategist's output.
+ * Looks for lines mentioning created/archived/promoted/demoted strategies.
+ */
+function extractLifecycleActions(output: string): string[] {
+  const actions: string[] = [];
+  const lines = output.split("\n");
+  let inLifecycleSection = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Detect lifecycle action lines
+    if (/ARCHIVED|CREATED|PROMOTED|DEMOTED|KILLED|ARCHIVE|FAILED/.test(trimmed)) {
+      actions.push(trimmed);
+      continue;
+    }
+
+    // Also catch table rows from the strategist's lifecycle actions table
+    if (/^\|\s*(🗑️|📝|⬆️|⬇️|✅|❌)/.test(trimmed)) {
+      // Strip markdown table formatting
+      const cleaned = trimmed.replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim();
+      if (cleaned.length > 5) actions.push(cleaned);
+    }
+  }
+
+  return actions;
+}
+
+/**
+ * Extract the strategist's market-level observations (not ticker-specific).
+ * Grabs the first paragraph or two of analysis text that isn't about a specific strategy.
+ */
+function extractMarketObservations(output: string): string | null {
+  const lines = output.split("\n");
+  const relevant: string[] = [];
+  let inAnalysis = false;
+  let seen = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Start collecting after the strategist mentions market overview or after a lifecycle header
+    if (/market overview|sector rotation|broad market|bearish.*cluster|bullish.*cluster|regime|breadth/.test(trimmed.toLowerCase()) &&
+        !trimmed.startsWith("#") && !trimmed.startsWith("**") && trimmed.length > 20) {
+      if (!seen) {
+        inAnalysis = true;
+        seen = true;
+      }
+    }
+
+    if (inAnalysis) {
+      // Stop at lifecycle table headers or strategy sections
+      if (/^\|\s*(Action|Ticker)/.test(trimmed) ||
+          /^##/.test(trimmed) && !relevant.length) {
+        continue;
+      }
+      if (trimmed.startsWith("###")) break;
+      if (trimmed.length > 0) relevant.push(trimmed);
+      // Stop collecting after ~15 lines (enough for a paragraph or two)
+      if (relevant.length > 15) break;
+    }
+  }
+
+  if (relevant.length === 0) return null;
+  return relevant.join(" ").slice(0, 800);
+}
+
+/**
+ * Extract per-strategy commentary from the strategist's output.
+ * Returns a map of ticker -> narrative note.
+ */
+function extractStrategyCommentary(output: string): Map<string, string> {
+  const notes = new Map<string, string>();
+  const lines = output.split("\n");
+
+  let currentTicker: string | null = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    // Detect strategy headers: both "### TICKER —" and "TICKER:" or "TICKER:" formats
+    const headerMatch = trimmed.match(/^###\s*(\d+\.\s*)?([A-Z]+)\s*[—–-]/);
+    const inlineMatch = !headerMatch && trimmed.match(/^([A-Z]{1,5})\s*[:]/);
+    if (headerMatch) {
+      currentTicker = headerMatch[2];
+      continue;
+    }
+    if (inlineMatch) {
+      currentTicker = inlineMatch[1];
+      // If it's a TICKER: comment format, capture the rest of the line as commentary
+      const rest = trimmed.slice(inlineMatch[0].length).trim();
+      if (rest.length > 10) {
+        const existing = notes.get(currentTicker) || "";
+        notes.set(currentTicker, existing + " " + rest);
+      }
+      continue;
+    }
+
+    // Detect lines that look like commentary (not structured fields)
+    if (currentTicker && trimmed.length > 30 &&
+        !trimmed.startsWith("**") &&
+        !trimmed.startsWith("|") &&
+        !trimmed.startsWith("---") &&
+        !trimmed.startsWith("#") &&
+        !trimmed.startsWith("_") &&
+        !/^Thesis:|^Catalyst:|^Timeframe:|^Key Signals:|^Entry Conditions:|^Exit Conditions:|^Historical Grade:|^Why #|^Rationale:/.test(trimmed) &&
+        !trimmed.startsWith("```")) {
+      const existing = notes.get(currentTicker) || "";
+      notes.set(currentTicker, existing + " " + trimmed);
+    }
+  }
+
+  // Trim and cap length per ticker
+  for (const [ticker, note] of notes) {
+    notes.set(ticker, note.trim().slice(0, 400));
+  }
+
+  return notes;
+}
+
+/**
+ * Extract warnings and cross-currents from the strategist's output.
+ */
+function extractWarnings(output: string): string[] {
+  const warnings: string[] = [];
+  const lines = output.split("\n");
+
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+    if (/warn|risk|caution|bearish|be careful|watch out|concern|squeeze|reversal/.test(trimmed) &&
+        trimmed.length > 20 && trimmed.length < 300) {
+      warnings.push(trimmed.slice(0, 200));
+    }
+  }
+
+  return warnings.slice(0, 3);
 }
 
 async function main() {
@@ -349,7 +432,10 @@ async function runStrategistSession(
       "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
       " | Total: " + strategies.getTotalCount() + "\n\n" +
       "QUALITY OVER QUANTITY. One well-researched strategy beats 15 copies of the same idea. " +
-      "Do not create strategies for tickers you already have strategies for unless the new thesis is fundamentally different."
+      "Do not create strategies for tickers you already have strategies for unless the new thesis is fundamentally different.\n\n" +
+      "OUTPUT FORMAT: Discuss strategies using `### TICKER —` headers followed by your narrative commentary. " +
+      "Do NOT repeat thesis/catalyst/entry/exit conditions — those are in the database. " +
+      "Cover: lifecycle actions, market observations, per-strategy narrative, and any warnings."
     : "=== STRATEGIST MID-SESSION UPDATE (Cycle " + cycle + ") ===\n\n" +
       "The market is open. New signals have accumulated since your last check.\n\n" +
       "YOUR TASKS:\n" +
@@ -367,7 +453,10 @@ async function runStrategistSession(
       "A strategy that doesn't develop within 24h should be archived.\n" +
       "Focus on CROSS-SOURCE CONVERGENCE: tickers appearing in 2+ different signal types are strongest.\n" +
       "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
-      " | Total: " + strategies.getTotalCount();
+      " | Total: " + strategies.getTotalCount() + "\n\n" +
+      "OUTPUT FORMAT: Discuss strategies using `### TICKER —` headers followed by your narrative commentary. " +
+      "Do NOT repeat thesis/catalyst/entry/exit conditions — those are in the database. " +
+      "Cover: lifecycle actions, market observations, per-strategy narrative, and any warnings.";
 
   // Create the strategist brain and run session
   try {

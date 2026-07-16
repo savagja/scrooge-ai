@@ -698,11 +698,50 @@ async function buildPerceptionPrompt(
   lines.push("⚠️  IMPORTANT: The market is CURRENTLY OPEN. Alpaca clock confirms this.");
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
   lines.push("");
+
+  // ── CALIBRATION CHECKLIST ──────────────────────────────────────────────
+  const calibration = state.getCalibrationTable();
+  const regimeCal = calibration.filter((c: any) => c.regime === market.regime);
+  if (regimeCal.length > 0) {
+    lines.push("═══ REGIME CALIBRATION CHECK (current regime: " + market.regime.toUpperCase() + ") ═══");
+    lines.push("Check each strategy\'s track record in this regime before placing a trade:");
+    lines.push("");
+    for (const c of regimeCal) {
+      const winRate = c.totalTrades > 0 ? (c.wins / c.totalTrades * 100) : 0;
+      let flag = "🆕 limited data";
+      if (winRate === 0 && c.totalTrades >= 3) flag = "⛔ SKIP — 0% win rate";
+      else if (winRate >= 60) flag = "✅ positive expectancy";
+      else if (winRate >= 40) flag = "➖ mixed results";
+      lines.push("  ☐ " + c.strategy + " in " + c.regime + ": " + c.wins + "/" + c.totalTrades + " wins (" + winRate.toFixed(0) + "%) — " + flag);
+    }
+    lines.push("");
+  }
+
+  // ── RECENT MISTAKES FLAG ──────────────────────────────────────────────
+  const todaysTrades = state.getTradesForDay(getTradingDate());
+  const lastThree = todaysTrades.slice(-3);
+  const recentLosses = lastThree.filter((t: any) => t.pnl < -1);
+  if (recentLosses.length > 0) {
+    lines.push("═══ RECENT MISTAKES ═══");
+    lines.push("The following trades lost money last cycle. Consider why before repeating similar setups:");
+    lines.push("");
+    for (const t of lastThree) {
+      const icon = t.pnl > 0 ? "✅" : t.pnl < -1 ? "❌" : "➖";
+      const exitPrice = t.exitPrice || t.entryPrice || 0;
+      lines.push("  " + icon + " " + t.symbol + " @ $" + exitPrice.toFixed(2) + ": " + (t.pnl >= 0 ? "+" : "") + "$" + t.pnl.toFixed(2) + " — " + t.strategy);
+    }
+    lines.push("");
+  }
+
   lines.push("INSTRUCTION:");
   lines.push("1. Review positions first — check if each position\'s linked strategy still holds.");
   lines.push("   The strategist already built the thesis. Your job: manage the position.");
-  lines.push("2. Read the STRATEGIST\'S BRIEFING (above) for narrative context, market summary, and the strategist\'s reasoning.");
-  lines.push("   The briefing explains WHY each strategy is at its rank and provides market commentary.");
+  lines.push("2. Read the STRATEGIST\'S BRIEFING (above) — it contains:");
+  lines.push("   • What changed since last cycle (lifecycle actions: promotions, kills, new creations)");
+  lines.push("   • Market-level observations the strategist noticed (sector rotation, cross-currents)");
+  lines.push("   • Per-strategy narrative notes about developing catalysts or risks");
+  lines.push("   • Warnings or things to watch out for");
+  lines.push("   The full strategy details (thesis, catalyst, entry/exit conditions) are in CANDIDATE STRATEGIES below.");
   lines.push("3. Then review the TOP CANDIDATE STRATEGIES above — these are pre-vetted by the strategist.");
   lines.push("   Cross-reference the strategist\'s reasoning with the structured data + price context provided.");
   lines.push("4. For thesis invalidation: close_position → place_sell_order → update_strategy_on_exit.");
@@ -724,7 +763,7 @@ async function buildPerceptionPrompt(
   lines.push("    • Do NOT attempt to evaluate tickers not listed in CANDIDATE STRATEGIES or POSITIONS.");
   lines.push("    • If the strategist's briefing mentions interesting tickers not in the structured list,");
   lines.push("      ignore them — they weren't ranked highly enough to be included.");
-  lines.push("    • You are an execution specialist, not a researcher. Stick to the data provided.");
+  lines.push("    • You are a portfolio manager, not a researcher. Your job is to allocate capital to the best setups the strategist provides.");
 
   return lines.join("\n");
 }

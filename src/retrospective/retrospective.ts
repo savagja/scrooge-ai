@@ -15,6 +15,7 @@ import { getTradingDate } from "../config.js";
 import { analyzeTraderExecution, type TraderRetroInput } from "./trader-retrospective.js";
 import { analyzeStrategistPerformance, extractPatternsFromWhatIf, type StrategistRetroInput } from "./strategist-retrospective.js";
 import { runWhatIfAnalysis, formatAbstractionsForPrompt, formatWhatIfForReport } from "./what-if.js";
+import { getAccount } from "../execution/alpaca.js";
 
 /**
  * Check whether the retrospective should run for today.
@@ -49,16 +50,14 @@ export async function runDailyRetrospective(state: PortfolioState, strategyStore
   const calibrationTable = state.getCalibrationTable();
   const tokenCost = state.getDailyTokenCost(today);
 
-  const allHistory = state.getSnapshotHistory();
-  const startingEquity = history.length > 0
-    ? history[0].totalEquity
-    : allHistory.length > 0
-      ? allHistory[allHistory.length - 1].totalEquity
-      : state.getSettledCash();
-  const endingEquity = history.length > 0
-    ? history[history.length - 1].totalEquity
-    : await state.getAccountEquity();
-  const totalEquityChange = endingEquity - startingEquity;
+  // ── Daily P&L from Alpaca (the single source of truth) ────────────────
+  // Alpaca's /v2/account returns `equity` (current) and `last_equity` (previous close).
+  // The daily change is simply equity - lastEquity. No calculation needed.
+  const account = await getAccount();
+  const alpacaDailyChange = account.equity - account.lastEquity;
+  const totalEquityChange = Math.round(alpacaDailyChange * 100) / 100;
+  const startingEquity = account.lastEquity;
+  const endingEquity = account.equity;
 
   const wins = trades.filter((t) => t.pnl > 0);
   const losses = trades.filter((t) => t.pnl <= 0);

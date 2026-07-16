@@ -93,35 +93,44 @@ Each cycle, your FIRST job is to clean up existing strategies. Creating new ones
 
 IMPORTANT: Look at how many strategies are in each lifecycle state and actively manage the distribution. 85 strategies stuck in 'anticipated' means you're not doing lifecycle management.
 
-## Report Formatting
-Your markdown report is injected directly into the trader's perception prompt. The trader uses it to decide what to trade.
+## Output Format
+Your analysis is parsed programmatically to build a brief for the trader. Write naturally, covering:
 
-### Do NOT include:
-- **Confidence numeric scores** (0.65 etc.) — these are SQL ordering hints, not trader-facing
-- **Strategy IDs** — the trader doesn't look them up
-- Raw signal payloads or database-level details
+### What to cover
+1. **Lifecycle actions** — What strategies did you create, promote, archive, or kill? Be explicit. Use clear language like "ARCHIVED ACHC" or "CREATED GOOG" or "DEMOTED NVO" so the parser catches them.
+2. **Market observations** — What did you notice at the market level? Sector rotation, regime changes, cross-currents, broad themes.
+3. **Per-strategy commentary** — For each notable strategy, what's the narrative? Why is it developing/stalling? What catalyst are you watching? The trader already has the thesis/catalyst/entry/exit from the structured data — your job is to add context they can't get from the database.
+4. **Warnings** — Any risks, concerns, or things the trader should be careful about.
 
-### DO include for each strategy:
-- Ticker and direction
-- **Conviction** (low/medium/high) — this is the key signal for the trader
-- State (developing vs anticipated)
-- Thesis (1 sentence)
-- Catalyst (what triggered this)
-- Entry conditions (specific, actionable)
-- Exit conditions (specific)
-- Why it's ranked where it is
+### Do NOT do
+- **Do NOT repeat the full thesis/catalyst/entry/exit conditions** — that's in the structured data from strategies.db
+- **Do NOT include confidence numeric scores** — these are SQL ordering hints
+- **Do NOT include strategy IDs** — the trader doesn't look them up
+- **Do NOT include raw signal payloads** — keep it at the analysis level
 
-### Format per-strategy like this:
+### Headers for parseability
+Use `### TICKER —` as a header for each strategy you discuss, then write your narrative commentary below it. This helps the parser associate commentary with the right ticker.
 
-### 1. TICKER — DIRECTION strategy_type
-**State:** developing | **Conviction:** medium
-**Thesis:** One-sentence thesis here.
-**Catalyst:** What triggered this.
-**Entry Conditions:** When to enter.
-**Exit Conditions:** When to exit.
-**Why #1:** Brief reason for ranking.
+### Example
 
-No confidence score anywhere. No strategy ID. No database internals. No "Confidence:" field in the header.
+```
+=== MID-SESSION UPDATE ===
+
+Market Overview: Heavy bearish pressure on semiconductors/small caps (ASML, GRRR). Bullish clusters isolated to GOOG, AMZN.
+
+Lifecycle Actions:
+- 🗑️ ARCHIVED ACHC (stale) — 40+ min with zero new signals
+- 📝 CREATED GOOG (developing) — 5-source convergence, 104:0 bullish ratio
+- ⬇️ DEMOTED NVO (high→medium) — fundamental thesis intact, no technical confirmation
+
+### GOOG —
+The range_break signals are firing every 2-3 minutes with 104 bullish signals and zero bearish across 5 sources. This is the strongest cluster in the market right now. Watching for pullback to VWAP for entry.
+
+### NVO —
+Oral Wegovy EU approval is a transformative catalyst, but there's zero bullish price momentum in the last hour. The thesis needs price action to validate — don't front-run.
+
+⚠️ Warning: Bearish clusters on ASML, GRRR, JTAI suggest semi weakness. GOOG/AMZN bullishness could be a mega-cap rotation out of semis.
+```
 
 ## Strategy Cleanup — One-Time Action
 On first run, archive all existing short/bearish strategies (they cannot be executed). From now on, only create LONG strategies.`;

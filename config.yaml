@@ -8,7 +8,7 @@
 initial_capital: 100          # Starting account size (for reference only)
 
 # ─── Strategy Parameters ─────────────────────────────────────
-poll_interval_ms: 120000       # Every 2 minutes — save tokens, context doesn't change meaningfully in 30s
+poll_interval_ms: 240000       # Every 4 minutes — reduced from 2min to lower CPU/memory on Pi
 watchlist:                    # Seed watchlist — bot will discover more dynamically
   - AAPL
   - TSLA
