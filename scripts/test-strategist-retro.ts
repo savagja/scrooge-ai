@@ -1,5 +1,5 @@
 /**
- * Test the strategist retrospective in isolation using Pi data
+ * Test the strategist retrospective in isolation using production data
  * Run: STRATEGIES_DB_PATH=data/strategies.pi.db npx tsx scripts/test-strategist-retro.ts
  */
 import { config } from "dotenv";

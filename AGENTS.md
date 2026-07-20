@@ -19,7 +19,7 @@ Scrooge is an **autonomous, AI-native portfolio manager** that uses an LLM (via 
 | [`docs/strategy-schema.md`](docs/strategy-schema.md) | SQLite database schema for `data/strategies.db` |
 | [`docs/learning-system.md`](docs/learning-system.md) | 3-phase learning: calibration table, vector memory, retrospective |
 | [`docs/risk-architecture.md`](docs/risk-architecture.md) | Guardrails: stop loss, trailing stop, time stop, squeeze protection |
-| [`docs/deployment.md`](docs/deployment.md) | Pi deployment, data source convention, SSH/API quick refs |
+| [`docs/deployment.md`](docs/deployment.md) | Deployment, data source convention, SSH/API quick refs |
 | [`docs/context-specs.md`](docs/context-specs.md) | Position context and ticker context format specs |
 | [`docs/data-sources.md`](docs/data-sources.md) | Data sources and research engine details |
 

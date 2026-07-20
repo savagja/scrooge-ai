@@ -8,7 +8,7 @@
 initial_capital: 100          # Starting account size (for reference only)
 
 # ─── Strategy Parameters ─────────────────────────────────────
-poll_interval_ms: 240000       # Every 4 minutes — reduced from 2min to lower CPU/memory on Pi
+poll_interval_ms: 240000       # Every 4 minutes — reduced from 2min to lower CPU/memory
 watchlist: []                  # No seed watchlist — the strategist discovers tickers dynamically via broad market sweeps of the research DB and Yahoo movers.
 
 discovery:

@@ -3,7 +3,7 @@
 Scrooge Dashboard API — Flask backend.
 
 Reads the bot's state.json and exposes REST endpoints for the dashboard UI.
-Designed to run on the same Pi as the bot, or alongside it.
+Designed to run on the same server as the bot, or alongside it.
 """
 
 import json
