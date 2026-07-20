@@ -1,13 +1,12 @@
 # Deployment
 
-**Target:** Raspberry Pi at `192.168.50.42` (user: `admin`, key: `~/.ssh/id_ed25519_pi`)
-- OS: Raspbian 13 (trixie), armv7l
-- Node.js 22.14.0 (armv7l binary)
-- systemd services: `scrooge-strategist.service` + `scrooge-trader.service` (two processes)
-- OR combined: `scrooge.service` (launches both strategist and trader)
-- Bot logs: `/home/admin/scrooge/logs/`
-- State: `/home/admin/scrooge/data/`
-- API: `http://192.168.50.42:5000/api/`
+**Target:** Raspberry Pi (replace `<pi-ip>` with your Pi's IP)
+- OS: Raspbian / Raspberry Pi OS
+- Node.js 20+
+- systemd services: `scrooge-strategist.service` + `scrooge-trader.service`
+- Bot logs: `logs/`
+- State: `data/`
+- API: `http://<pi-ip>:5000/api/`
 
 ## How to Deploy
 
@@ -32,14 +31,14 @@ When deploying code changes to the Pi, use the deploy scripts at `deploy/`. The 
    - Restart the relevant systemd services (`scrooge-trader`, `scrooge-strategist`, `scrooge-api`)
 4. **Verify post-deploy**:
    ```bash
-   ssh admin@192.168.50.42
+   ssh <user>@<pi-ip>
    sudo systemctl status scrooge-trader scrooge-strategist
-   tail -30 /home/admin/scrooge/logs/scrooge.log
+   tail -30 logs/scrooge.log
    ```
 5. **If the deploy includes new files or structural changes**, also deploy the API:
    ```bash
    # The deploy script handles this, but double-check:
-   ssh admin@192.168.50.42 'sudo systemctl restart scrooge-api'
+   ssh <user>@<pi-ip> 'sudo systemctl restart scrooge-api'
    ```
 
 ## Pre-deploy Checklist
@@ -53,10 +52,10 @@ When deploying code changes to the Pi, use the deploy scripts at `deploy/`. The 
 ## Emergency Rollback
 
 ```bash
-ssh admin@192.168.50.42
-cd /home/admin/scrooge
+ssh <user>@<pi-ip>
+cd ~/scrooge
 # Previous deploy is in /tmp/scrooge-deploy-*.tar.gz — extract it:
-sudo tar xzf /tmp/scrooge-deploy-*.tar.gz -C /home/admin/scrooge
+sudo tar xzf /tmp/scrooge-deploy-*.tar.gz -C ~/scrooge
 sudo systemctl restart scrooge-trader scrooge-strategist
 ```
 
@@ -66,7 +65,7 @@ sudo systemctl restart scrooge-trader scrooge-strategist
 
 When asked about status, summaries, reports, positions, trades, strategies, lessons, P&L, or any other runtime state:
 
-1. **Always pull from the deployed Pi first.** Use SSH (`ssh admin@192.168.50.42`) or the Flask API (`http://192.168.50.42:5000/api/...`) to read the actual production data.
+1. **Always pull from the deployed Pi first.** Use SSH (`ssh <user>@<pi-ip>`) or the Flask API (`http://<pi-ip>:5000/api/...`) to read the actual production data.
 2. **FLASK API endpoints** (preferred — uses HTTP, no SSH needed):
    - `GET /api/status` — Account summary, cash, positions, daily P&L
    - `GET /api/report` — Latest daily retrospective report (full markdown)
@@ -78,19 +77,19 @@ When asked about status, summaries, reports, positions, trades, strategies, less
    - `GET /api/memory` — Lessons, calibration table, context notes
    - `GET /api/state` — Full persisted state.json dump
 3. **SSH file access** (if API is down):
-   - State: `cat /home/admin/scrooge/data/state.json`
+   - State: `cat data/state.json`
    - Strategies: use `node -e` with better-sqlite3 on the Pi (or copy the db)
-   - Logs: `tail -100 /home/admin/scrooge/logs/scrooge.log`
+   - Logs: `tail -100 logs/scrooge.log`
    - Service status: `systemctl status scrooge-trader scrooge-strategist`
 4. **Do NOT read local `data/state.json`** for production queries. It's a test file with placeholder data. Always preface answers about production state with "From the deployed Pi: ..."
 
 ## SSH Quick Reference
 
 ```bash
-ssh admin@192.168.50.42
+ssh <user>@<pi-ip>
 # then:
-cat /home/admin/scrooge/data/state.json | jq '.cash, .positions, .dailyPnL'
-tail -50 /home/admin/scrooge/logs/scrooge.log
+cat ~/scrooge/data/state.json | jq '.cash, .positions, .dailyPnL'
+tail -50 ~/scrooge/logs/scrooge.log
 systemctl status scrooge-trader
 systemctl status scrooge-strategist
 journalctl -u scrooge-trader --since today
@@ -100,14 +99,14 @@ journalctl -u scrooge-trader --since today
 
 ```bash
 # Status overview
-curl -s http://192.168.50.42:5000/api/status | jq .
+curl -s http://<pi-ip>:5000/api/status | jq .
 
 # Latest retrospective report
-curl -s http://192.168.50.42:5000/api/report | jq '.markdown[:500]'
+curl -s http://<pi-ip>:5000/api/report | jq '.markdown[:500]'
 
 # Current positions
-curl -s http://192.168.50.42:5000/api/positions | jq .
+curl -s http://<pi-ip>:5000/api/positions | jq .
 
 # Strategy lifecycle counts
-curl -s http://192.168.50.42:5000/api/strategies | jq '.stateCounts'
+curl -s http://<pi-ip>:5000/api/strategies | jq '.stateCounts'
 ```

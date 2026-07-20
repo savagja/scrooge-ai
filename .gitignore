@@ -16,13 +16,12 @@ venv/
 env/
 
 # Bot data / logs
-data/*.json
-data/*.db* # research.db, strategies.db, WAL files
+data/
 logs/*.log
 
 # SQLite WAL files
-data/*.db-shm
-data/*.db-wal
+*.db-shm
+*.db-wal
 
 # Ad-hoc test scripts
 check_alpaca*
@@ -35,9 +34,13 @@ check_alpaca*
 # OS
 .DS_Store
 Thumbs.db
-node_modules/
+
+# Compiled JS
 dist/
 node_modules/
-dist/
-data/research.db
-data/strategies.db
+
+# Orphaned artifacts
+:memory:
+
+# Deployment (internal IPs, private infrastructure)
+deploy/

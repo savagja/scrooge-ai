@@ -9,27 +9,11 @@ initial_capital: 100          # Starting account size (for reference only)
 
 # ─── Strategy Parameters ─────────────────────────────────────
 poll_interval_ms: 240000       # Every 4 minutes — reduced from 2min to lower CPU/memory on Pi
-watchlist:                    # Seed watchlist — bot will discover more dynamically
-  - AAPL
-  - TSLA
-  - NVDA
-  - AMD
-  - MSFT
-  - AMZN
-  - GOOGL
-  - META
-  - NFLX
-  - CRM
-  - PLTR
-  - COIN
-  - HOOD
-  - SOFI
-  - ENPH
-  - FSLR
+watchlist: []                  # No seed watchlist — the strategist discovers tickers dynamically via broad market sweeps of the research DB and Yahoo movers.
 
 discovery:
-  enabled: true               # Allow bot to discover tickers outside watchlist
-  max_discovered: 10          # How many extra tickers to add dynamically
+  enabled: true               # Yahoo movers/gainers/trending for broad market discovery
+  max_discovered: 10          # How many extra tickers to surface via Yahoo
   refresh_interval_cycles: 3  # Re-discover every N cycles
 
 # ─── Risk Parameters ──────────────────────────────────────────

@@ -2,9 +2,9 @@
 
 This document describes the REST API served by the Scrooge Flask backend, designed for dashboard visualizations. The API reads directly from the bot's `state.json` file and requires no authentication (internal network only).
 
-**Base URL:** `http://192.168.50.42:5000/api/`
+**Base URL:** `http://<your-pi-ip>:5000/api/`
 
-**Data source:** `/home/admin/scrooge/data/state.json` (overridable via `SCROOGE_STATE` env var)
+**Data source:** `data/state.json` (overridable via `SCROOGE_STATE` env var)
 
 **CORS:** Enabled for all origins.
 
@@ -405,20 +405,20 @@ All endpoints return an error object with a 4xx or 5xx status code if something 
 
 | Property | Value |
 |----------|-------|
-| Host | `192.168.50.42` (Raspberry Pi) |
+| Host | `<your-pi-ip>` (Raspberry Pi) |
 | Port | `5000` |
 | Protocol | HTTP (internal network only) |
 | Server | Gunicorn (WSGI) |
 | Framework | Flask 3.x |
 | Process management | systemd (`scrooge-api.service`, auto-restart) |
-| State file | `/home/admin/scrooge/data/state.json` |
-| Logs | `/home/admin/scrooge/logs/api.log` (access), `api-error.log` (errors) |
+| State file | `data/state.json` |
+| Logs | `logs/api.log` (access), `api-error.log` (errors) |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCROOGE_STATE` | `/home/admin/scrooge/data/state.json` | Path to state file |
+| `SCROOGE_STATE` | `data/state.json` | Path to state file |
 | `SCROOGE_API_PORT` | `5000` | Listening port |
 | `SCROOGE_API_HOST` | `0.0.0.0` | Listening address |
 | `SCROOGE_API_DEBUG` | `0` | Enable Flask debug mode |
@@ -429,26 +429,26 @@ All endpoints return an error object with a 4xx or 5xx status code if something 
 
 ```bash
 # Get overview
-curl http://192.168.50.42:5000/api/overview
+curl http://localhost:5000/api/overview
 
 # Get today's volume
-curl http://192.168.50.42:5000/api/daily-volume
+curl http://localhost:5000/api/daily-volume
 
 # Get a specific day's range
-curl "http://192.168.50.42:5000/api/daily-range?date=2026-06-16"
+curl "http://localhost:5000/api/daily-range?date=2026-06-16"
 
 # Get 7-day equity curve
-curl "http://192.168.50.42:5000/api/equity-curve?days=7"
+curl "http://localhost:5000/api/equity-curve?days=7"
 
 # Get recent trades
-curl "http://192.168.50.42:5000/api/trades?limit=10"
+curl "http://localhost:5000/api/trades?limit=10"
 
 # Get activity stream (last 24h, default)
-curl http://192.168.50.42:5000/api/activity-stream
+curl http://localhost:5000/api/activity-stream
 
 # Get activity stream (last 6 hours, only trade openings)
-curl "http://192.168.50.42:5000/api/activity-stream?hours=6&type=trade_opened"
+curl "http://localhost:5000/api/activity-stream?hours=6&type=trade_opened"
 
 # Health check
-curl http://192.168.50.42:5000/api/health
+curl http://localhost:5000/api/health
 ```

@@ -153,9 +153,9 @@ The bridge between strategist and trader is `data/strategies.db` — a SQLite da
 
 ## 🚀 [Deployment](docs/deployment.md)
 
-**Target:** Raspberry Pi at `192.168.50.42` (user: `admin`)
+**Target:** Raspberry Pi (replace `<pi-ip>` with your Pi's IP)
 - systemd services: `scrooge-trader`, `scrooge-strategist`, `scrooge-api`
-- Flask API dashboard: `http://192.168.50.42:5000/api/`
+- Flask API dashboard: `http://<pi-ip>:5000/api/`
 
 **⚠️ The deployed Pi is the canonical data source.** Always pull production state from the Pi, not from the local `data/` directory.
 
