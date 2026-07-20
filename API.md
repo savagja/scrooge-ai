@@ -405,7 +405,7 @@ All endpoints return an error object with a 4xx or 5xx status code if something 
 
 | Property | Value |
 |----------|-------|
-| Host | `<your-pi-ip>` (Raspberry Pi) |
+| Host | `<host-ip>` |
 | Port | `5000` |
 | Protocol | HTTP (internal network only) |
 | Server | Gunicorn (WSGI) |

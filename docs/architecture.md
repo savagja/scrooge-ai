@@ -142,7 +142,7 @@ Scrooge runs **two separate agent processes** — a **Strategist** and a **Trade
 
 | File | Purpose |
 |------|---------|
-| `deploy/deploy.py` | **Python deploy script** (preferred — uses paramiko via Dobby's connection helpers, ships code, installs deps, restarts services). |
+| `deploy/deploy.py` | **Python deploy script** (ships code, installs deps, restarts services). |
 | `deploy/deploy.sh` | Bash deploy script (alternative, uses rsync + ssh). |
 | `deploy/CHECKLIST.md` | Step-by-step deployment checklist. |
 

@@ -245,9 +245,9 @@ Results are persisted in `state.json` and strategies are updated in `data/strate
 
 ---
 
-## 🏁 Running on a Raspberry Pi
+## 🏁 Running 24/7
 
-Scrooge is designed to run 24/7 on a low-power device. See [`docs/deployment.md`](docs/deployment.md) for:
+Scrooge is designed to run continuously during market hours. See [`docs/deployment.md`](docs/deployment.md) for:
 
 - Systemd service setup (strategist + trader + API)
 - Automated deploy scripts

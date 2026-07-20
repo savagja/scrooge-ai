@@ -1,16 +1,16 @@
 # Deployment
 
-**Target:** Raspberry Pi (replace `<pi-ip>` with your Pi's IP)
-- OS: Raspbian / Raspberry Pi OS
+**Target:** Any server (e.g., a VPS, home server, or cloud VM)
+- OS: Linux with systemd
 - Node.js 20+
 - systemd services: `scrooge-strategist.service` + `scrooge-trader.service`
 - Bot logs: `logs/`
 - State: `data/`
-- API: `http://<pi-ip>:5000/api/`
+- API: `http://<host-ip>:5000/api/`
 
 ## How to Deploy
 
-When deploying code changes to the Pi, use the deploy scripts at `deploy/`. The process:
+When deploying code changes to your server, use the deploy scripts at `deploy/`. The process:
 
 1. **Commit or at least save** all changes locally first (deploy ships the entire working tree)
 2. **Run the deploy script** from the scrooge root:
@@ -25,8 +25,8 @@ When deploying code changes to the Pi, use the deploy scripts at `deploy/`. The 
 3. The deploy script will:
    - Validate `.env` exists with API keys
    - Create a tarball of the repo (excluding `node_modules/`, `data/`, `logs/`)
-   - SCP it to the Pi
-   - Extract on Pi
+   - SCP it to the server
+   - Extract on server
    - Run `npm install` (skipped if `node_modules` already fresh)
    - Restart the relevant systemd services (`scrooge-trader`, `scrooge-strategist`, `scrooge-api`)
 4. **Verify post-deploy**:
@@ -61,11 +61,11 @@ sudo systemctl restart scrooge-trader scrooge-strategist
 
 ## ⚠️ Data Source Convention
 
-**The deployed Pi is the canonical data source for all information about Scrooge in production.** The local development environment (`/home/jonsavage/Projects/scrooge/data/`) contains only test/fixture data and should NEVER be used when answering questions about the running system.
+**The deployed server is the canonical data source for all information about Scrooge in production.** The local development environment (`data/`) contains only test/fixture data and should NEVER be used when answering questions about the running system.
 
 When asked about status, summaries, reports, positions, trades, strategies, lessons, P&L, or any other runtime state:
 
-1. **Always pull from the deployed Pi first.** Use SSH (`ssh <user>@<pi-ip>`) or the Flask API (`http://<pi-ip>:5000/api/...`) to read the actual production data.
+1. **Always pull from the deployed server first.** Use SSH (`ssh <user>@<host-ip>`) or the Flask API (`http://<host-ip>:5000/api/...`) to read the actual production data.
 2. **FLASK API endpoints** (preferred — uses HTTP, no SSH needed):
    - `GET /api/status` — Account summary, cash, positions, daily P&L
    - `GET /api/report` — Latest daily retrospective report (full markdown)
@@ -78,10 +78,10 @@ When asked about status, summaries, reports, positions, trades, strategies, less
    - `GET /api/state` — Full persisted state.json dump
 3. **SSH file access** (if API is down):
    - State: `cat data/state.json`
-   - Strategies: use `node -e` with better-sqlite3 on the Pi (or copy the db)
+   - Strategies: use `node -e` with better-sqlite3 on the server (or copy the db)
    - Logs: `tail -100 logs/scrooge.log`
    - Service status: `systemctl status scrooge-trader scrooge-strategist`
-4. **Do NOT read local `data/state.json`** for production queries. It's a test file with placeholder data. Always preface answers about production state with "From the deployed Pi: ..."
+4. **Do NOT read local `data/state.json`** for production queries. It's a test file with placeholder data. Always preface answers about production state with "From the deployed server: ..."
 
 ## SSH Quick Reference
 

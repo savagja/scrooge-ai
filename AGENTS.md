@@ -153,11 +153,11 @@ The bridge between strategist and trader is `data/strategies.db` — a SQLite da
 
 ## 🚀 [Deployment](docs/deployment.md)
 
-**Target:** Raspberry Pi (replace `<pi-ip>` with your Pi's IP)
+**Target:** Any server (replace `<host-ip>` with your server's IP)
 - systemd services: `scrooge-trader`, `scrooge-strategist`, `scrooge-api`
 - Flask API dashboard: `http://<pi-ip>:5000/api/`
 
-**⚠️ The deployed Pi is the canonical data source.** Always pull production state from the Pi, not from the local `data/` directory.
+**⚠️ The deployed server is the canonical data source.** Always pull production state from the deployed server, not from the local `data/` directory.
 
 ---
 
@@ -199,7 +199,7 @@ The research engine (`data/research.db`) runs 24/7, accumulating signals from al
 - Event loop structure (but now runs in the trader process only)
 - Research engine (24/7 independent signal accumulation)
 - Flask API dashboard (now reads both state.json and strategies.db)
-- Deployment target (Raspberry Pi, systemd services)
+- Deployment target (systemd services)
 - All existing data ingestion code (Yahoo, EDGAR, Reddit, Alpaca news, volume scanners)
 - Position context spec format (now includes strategy linkage)
 - Ticker context spec format (unchanged)
