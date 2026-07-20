@@ -155,7 +155,8 @@ The bridge between strategist and trader is `data/strategies.db` — a SQLite da
 
 **Target:** Any server (replace `<host-ip>` with your server's IP)
 - systemd services: `scrooge-trader`, `scrooge-strategist`, `scrooge-api`
-- Flask API dashboard: `http://<pi-ip>:5000/api/`
+- Flask API dashboard: `http://<host-ip>:5000/api/`
+- Deploy via `git pull` — see [`docs/deployment.md`](docs/deployment.md)
 
 **⚠️ The deployed server is the canonical data source.** Always pull production state from the deployed server, not from the local `data/` directory.
 

@@ -1,112 +1,192 @@
 # Deployment
 
-**Target:** Any server (e.g., a VPS, home server, or cloud VM)
-- OS: Linux with systemd
-- Node.js 20+
-- systemd services: `scrooge-strategist.service` + `scrooge-trader.service`
-- Bot logs: `logs/`
-- State: `data/`
-- API: `http://<host-ip>:5000/api/`
+**Target:** Any server (VPS, home server, cloud VM) with Node.js 20+ and systemd.
 
-## How to Deploy
+## Overview
 
-When deploying code changes to your server, use the deploy scripts at `deploy/`. The process:
-
-1. **Commit or at least save** all changes locally first (deploy ships the entire working tree)
-2. **Run the deploy script** from the scrooge root:
-   ```bash
-   # Option A: Python (preferred — uses paramiko, handles .env, deps, service restart)
-   python deploy/deploy.py
-
-   # Option B: Bash (fallback if Python deps missing)
-   chmod +x deploy/deploy.sh
-   ./deploy/deploy.sh
-   ```
-3. The deploy script will:
-   - Validate `.env` exists with API keys
-   - Create a tarball of the repo (excluding `node_modules/`, `data/`, `logs/`)
-   - SCP it to the server
-   - Extract on server
-   - Run `npm install` (skipped if `node_modules` already fresh)
-   - Restart the relevant systemd services (`scrooge-trader`, `scrooge-strategist`, `scrooge-api`)
-4. **Verify post-deploy**:
-   ```bash
-   ssh <user>@<pi-ip>
-   sudo systemctl status scrooge-trader scrooge-strategist
-   tail -30 logs/scrooge.log
-   ```
-5. **If the deploy includes new files or structural changes**, also deploy the API:
-   ```bash
-   # The deploy script handles this, but double-check:
-   ssh <user>@<pi-ip> 'sudo systemctl restart scrooge-api'
-   ```
-
-## Pre-deploy Checklist
-
-- [ ] Does `.env` exist with `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `OPENROUTER_API_KEY`?
-- [ ] Is `ALPACA_PAPER=true` in `.env`? (Unless intentionally going live)
-- [ ] Does `npx tsc --noEmit` pass cleanly?
-- [ ] Has `config.yaml` been reviewed for the new changes?
-- [ ] Are the systemd service files up to date? (`deploy/` carries them)
-
-## Emergency Rollback
+Deploying Scrooge is a simple **git pull** workflow. Once the repo is cloned and secrets are in place, updating is just:
 
 ```bash
-ssh <user>@<pi-ip>
-cd ~/scrooge
-# Previous deploy is in /tmp/scrooge-deploy-*.tar.gz — extract it:
-sudo tar xzf /tmp/scrooge-deploy-*.tar.gz -C ~/scrooge
+ssh <user>@<host>
+cd scrooge
+git pull
+npm install
 sudo systemctl restart scrooge-trader scrooge-strategist
 ```
 
-## ⚠️ Data Source Convention
+The main thing you need to manage yourself is **secrets** — API keys go in `.env`, which should never be committed to git.
 
-**The deployed server is the canonical data source for all information about Scrooge in production.** The local development environment (`data/`) contains only test/fixture data and should NEVER be used when answering questions about the running system.
+---
 
-When asked about status, summaries, reports, positions, trades, strategies, lessons, P&L, or any other runtime state:
+## Initial Server Setup
 
-1. **Always pull from the deployed server first.** Use SSH (`ssh <user>@<host-ip>`) or the Flask API (`http://<host-ip>:5000/api/...`) to read the actual production data.
-2. **FLASK API endpoints** (preferred — uses HTTP, no SSH needed):
-   - `GET /api/status` — Account summary, cash, positions, daily P&L
-   - `GET /api/report` — Latest daily retrospective report (full markdown)
-   - `GET /api/reports` — All daily reports
-   - `GET /api/positions` — Current open positions
-   - `GET /api/trades` — Recent trade history
-   - `GET /api/strategies` — Current strategy lifecycle state counts
-   - `GET /api/activity` — Recent activity stream
-   - `GET /api/memory` — Lessons, calibration table, context notes
-   - `GET /api/state` — Full persisted state.json dump
-3. **SSH file access** (if API is down):
-   - State: `cat data/state.json`
-   - Strategies: use `node -e` with better-sqlite3 on the server (or copy the db)
-   - Logs: `tail -100 logs/scrooge.log`
-   - Service status: `systemctl status scrooge-trader scrooge-strategist`
-4. **Do NOT read local `data/state.json`** for production queries. It's a test file with placeholder data. Always preface answers about production state with "From the deployed server: ..."
-
-## SSH Quick Reference
+### 1. Clone the repo
 
 ```bash
-ssh <user>@<pi-ip>
-# then:
-cat ~/scrooge/data/state.json | jq '.cash, .positions, .dailyPnL'
-tail -50 ~/scrooge/logs/scrooge.log
-systemctl status scrooge-trader
-systemctl status scrooge-strategist
-journalctl -u scrooge-trader --since today
+ssh <user>@<host>
+git clone <your-repo-url> scrooge
+cd scrooge
+npm install
 ```
 
-## API Quick Reference
+### 2. Create secrets
 
 ```bash
-# Status overview
-curl -s http://<pi-ip>:5000/api/status | jq .
+cp .env.example .env
+nano .env
+# Fill in: ALPACA_API_KEY, ALPACA_SECRET_KEY, OPENROUTER_API_KEY
+chmod 600 .env
+```
 
-# Latest retrospective report
-curl -s http://<pi-ip>:5000/api/report | jq '.markdown[:500]'
+### 3. Test
 
-# Current positions
-curl -s http://<pi-ip>:5000/api/positions | jq .
+```bash
+DRY_RUN=true npx tsx src/index.ts
+```
 
-# Strategy lifecycle counts
-curl -s http://<pi-ip>:5000/api/strategies | jq '.stateCounts'
+### 4. Set up systemd services
+
+Create service files so Scrooge runs as a daemon and restarts on failure.
+
+**`/etc/systemd/system/scrooge-strategist.service`:**
+
+```ini
+[Unit]
+Description=Scrooge Strategist - forms trading hypotheses
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/scrooge
+Environment="NODE_ENV=production"
+EnvironmentFile=/home/<user>/scrooge/.env
+ExecStart=/usr/bin/npx tsx strategist.ts
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/<user>/scrooge/logs/strategist.log
+StandardError=append:/home/<user>/scrooge/logs/strategist.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/systemd/system/scrooge-trader.service`:**
+
+```ini
+[Unit]
+Description=Scrooge Trader - executes strategies
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/scrooge
+Environment="NODE_ENV=production"
+EnvironmentFile=/home/<user>/scrooge/.env
+ExecStart=/usr/bin/npx tsx trader.ts
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/<user>/scrooge/logs/trader.log
+StandardError=append:/home/<user>/scrooge/logs/trader.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Optional — Flask Dashboard API (`/etc/systemd/system/scrooge-api.service`):**
+
+```ini
+[Unit]
+Description=Scrooge Dashboard API (Flask)
+After=network.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/scrooge
+Environment=SCROOGE_STATE=/home/<user>/scrooge/data/state.json
+Environment=SCROOGE_API_PORT=5000
+Environment=SCROOGE_API_HOST=0.0.0.0
+ExecStart=/home/<user>/.local/bin/gunicorn -b 0.0.0.0:5000 --workers 2 --log-file /home/<user>/scrooge/logs/api.log --error-logfile /home/<user>/scrooge/logs/api-error.log api.app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable scrooge-strategist scrooge-trader
+sudo systemctl start scrooge-strategist scrooge-trader
+```
+
+---
+
+## Updating
+
+```bash
+ssh <user>@<host>
+cd scrooge
+git pull                     # fetch latest code
+npm install                  # new/updated deps
+sudo systemctl restart scrooge-trader scrooge-strategist
+```
+
+If the update changed the API code:
+
+```bash
+sudo systemctl restart scrooge-api
+```
+
+---
+
+## Secrets Management
+
+Never commit `.env` to git. It's already in `.gitignore`, but:
+
+- **First time:** `cp .env.example .env` on the server, fill in real keys
+- **Updates:** Edit `.env` directly on the server (`nano .env`), then restart services
+- **Rotating keys:** Same process — edit `.env`, restart
+- **Multiple servers:** Copy `.env` via `scp` or a password manager
+
+Alternatively, use environment variables injected by your hosting platform (e.g., Railway, Fly.io, systemd `Environment=` lines) instead of a file-based `.env`.
+
+---
+
+## ⚠️ Data Source Convention
+
+**The deployed server is the canonical data source for all runtime state** — positions, trades, lessons, strategies. The local development `data/` directory contains only test/fixture data.
+
+When checking production state:
+
+- **Preferred:** Flask API `http://<host>:5000/api/...`
+- **Fallback:** `ssh <user>@<host> && cat data/state.json`
+
+Do not rely on your local `data/state.json` for production answers.
+
+---
+
+## Systemd Control
+
+```bash
+sudo systemctl status scrooge-trader       # check if running
+sudo systemctl restart scrooge-trader      # restart after config/code change
+sudo systemctl stop scrooge-trader         # emergency stop
+sudo journalctl -u scrooge-trader -f       # live logs
+tail -f logs/trader.log                    # file logs
+```
+
+---
+
+## Rollback
+
+```bash
+cd scrooge
+git log --oneline -10
+git checkout <previous-commit-hash>
+sudo systemctl restart scrooge-trader scrooge-strategist
 ```
