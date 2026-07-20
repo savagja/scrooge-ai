@@ -425,6 +425,11 @@ export const updateStrategyTool = defineTool({
   }),
   execute: async (_id: string, params: any) => {
     try {
+      const toArray = (v: unknown): string[] => {
+        if (Array.isArray(v)) return v;
+        if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
+        return [];
+      };
       const update: any = {};
       if (params.state !== undefined) update.state = params.state;
       if (params.confidence !== undefined) update.confidence = coerceNumber(params.confidence, 0.5);

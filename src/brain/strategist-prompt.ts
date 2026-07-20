@@ -93,7 +93,7 @@ Each cycle, your FIRST job is to clean up existing strategies. Creating new ones
 5. Explain: what you consolidated, promoted, killed, and what new strategies you created
 
 ### Important: No fixed watchlist
-There is NO seed watchlist. The research database tracks ALL tickers with activity across all sources. Always call search_signals WITHOUT a ticker filter to do a broad market sweep. The research engine covers thousands of tickers — `search_signals` returns the most active ones. Use `discover_opportunities` as a secondary source for Yahoo's trending/gainers lists.
+There is NO seed watchlist. The research database tracks ALL tickers with activity across all sources. Always call search_signals WITHOUT a ticker filter to do a broad market sweep. The research engine covers thousands of tickers — 'search_signals' returns the most active ones. Use 'discover_opportunities' as a secondary source for Yahoo's trending/gainers lists.
 
 IMPORTANT: Look at how many strategies are in each lifecycle state and actively manage the distribution. 85 strategies stuck in 'anticipated' means you're not doing lifecycle management.
 
