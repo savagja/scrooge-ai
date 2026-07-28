@@ -18,6 +18,27 @@ const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)
 // Alpaca base URL for checking asset eligibility
 const ALPACA_DATA_URL = "https://data.alpaca.markets";
 
+// Regex to filter out non-US-equity tickers that commonly appear in Yahoo data.
+// Catches: crypto (BTC-USD, XRP-USD), mutual funds (FXAIX), foreign stocks (ASML, NESTE),
+// Canadian (SHOP), and anything with exchange suffixes.
+const INVALID_TICKER_REGEX = /[-.^=]|\d{2,}$/;
+const COMMON_FOREIGN_TICKERS = new Set([
+  // Non-US large caps that Yahoo includes in "most active"
+  "ASML", "SHOP", "NESTE", "SAP", "DSV", "WISE", "VOW", "ENR", "CLS",
+  "NOKIA", "WSP", "TCS", "ULVR", "XERI", "NSRGY",
+  // Dual-listed / OTC that aren't tradeable on Alpaca
+  "VALMT",
+]);
+
+function isUsEquity(symbol: string): boolean {
+  const upper = symbol.toUpperCase();
+  if (INVALID_TICKER_REGEX.test(upper)) return false;
+  if (COMMON_FOREIGN_TICKERS.has(upper)) return false;
+  // Crypto tickers from Yahoo (suffix format)
+  if (upper.endsWith("-USD") || upper.endsWith("-EUR") || upper.endsWith("-CAD") || upper.endsWith("-GBP")) return false;
+  return true;
+}
+
 function getAlpacaHeaders() {
   const key = process.env.ALPACA_API_KEY;
   const secret = process.env.ALPACA_SECRET_KEY;
@@ -120,17 +141,19 @@ export async function scanYahooMarketMovers(
         const quotes = data.finance?.result?.[0]?.quotes || [];
         result.trending = quotes
           .map((q: any) => ({ symbol: q.symbol }))
-          .filter((q: any) => q.symbol && !q.symbol.includes("^") && !q.symbol.includes("="));
+          .filter((q: any) => q.symbol && isUsEquity(q.symbol));
       } else {
         const quotes = data.finance?.result?.[0]?.quotes || [];
-        const mapped = quotes.map((q: any) => ({
-          symbol: q.symbol,
-          name: q.shortName || q.longName || "",
-          price: q.regularMarketPrice || 0,
-          change: q.regularMarketChange || 0,
-          changePct: q.regularMarketChangePercent || 0,
-          volume: q.regularMarketVolume || 0,
-        }));
+        const mapped = quotes
+          .filter((q: any) => q.symbol && isUsEquity(q.symbol))
+          .map((q: any) => ({
+            symbol: q.symbol,
+            name: q.shortName || q.longName || "",
+            price: q.regularMarketPrice || 0,
+            change: q.regularMarketChange || 0,
+            changePct: q.regularMarketChangePercent || 0,
+            volume: q.regularMarketVolume || 0,
+          }));
 
         if (screen.key === "mostActive") result.mostActive = mapped;
         if (screen.key === "gainers") result.gainers = mapped;
