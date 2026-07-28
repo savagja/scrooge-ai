@@ -96,7 +96,7 @@ This means:
 | Table | Purpose | Retention |
 |-------|---------|-----------|
 | `tickers` | All tickers ever seen, with `first_seen`/`last_seen` | Permanent |
-| `signals` | Raw signal events from all sources | 14 days → rolled into hourly/daily |
+| `signals` | Raw signal events from all sources (incl. stocktwits_trending, stocktwits_sentiment, nitter_finfluencer) | 14 days → rolled into hourly/daily |
 | `signal_hourly` | Hourly aggregates (counts, avg/max score, bullish/bearish) | 90 days |
 | `signal_daily` | Daily aggregates (counts, score, source count) | 365 days |
 | `fundamentals` | Asset metadata (name, sector) refreshed daily | Replaced on refresh |

@@ -39,6 +39,7 @@ import {
   scanPreMarketGapsTool as _spg, scanRangeBreaksTool as _srb,
   scanRedditTool as _sr, discoverOpportunitiesTool as _do,
   searchSignalsTool as _ss, describeDatasetsTool as _dd,
+  scanXSocialTool as _sxs,
 } from "./tools.js";
 
 import { getSignalStore } from "../research/index.js";
@@ -126,6 +127,7 @@ export const scanRelativeVolumeTool = _srv;
 export const scanPreMarketGapsTool = _spg;
 export const scanRangeBreaksTool = _srb;
 export const scanRedditTool = _sr;
+export const scanXSocialTool = _sxs;
 export const discoverOpportunitiesTool = _do;
 export const searchSignalsTool = _ss;
 export const describeDatasetsTool = _dd;
@@ -473,7 +475,7 @@ export const archiveStrategyTool = defineTool({
 export const allStrategistTools = [
   fetchMarketDataTool, fetchNewsTool, fetchAllNewsTool, fetchEdgarFilingsTool,
   scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
-  scanRedditTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
+  scanRedditTool, scanXSocialTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
   searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool, listStrategiesTool,
   queryTechnicalIndicatorsTool, getTickerTechnicalsTool,
   createStrategyTool, updateStrategyTool, archiveStrategyTool,

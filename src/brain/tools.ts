@@ -41,6 +41,7 @@ import {
   scanRangeBreaks,
 } from "../ingestion/scanner.js";
 import { scanRedditMentions, getRedditHot } from "../ingestion/social.js";
+import { scanXSocial, fetchStockTwitsTrending, fetchFinfluencerTweets } from "../ingestion/x-social.js";
 import { discoverOpportunities, getActiveWatchlist } from "../ingestion/discovery.js";
 import {
   getAccount,
@@ -447,6 +448,94 @@ export const scanRedditTool = defineTool({
         s.topPosts.length > 0 ? `  Top post: "${s.topPosts[0].title}" (${s.topPosts[0].subreddit}, score: ${s.topPosts[0].score})` : "",
         ""
       );
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+      details: { count: scans.length, scans },
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// X / STOCKTWITS TOOLS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const scanXSocialTool = defineTool({
+  name: "scan_x_social",
+  label: "Scan X / StockTwits",
+  description:
+    "Scan X/Twitter and StockTwits for trending tickers and sentiment. " +
+    "Three data sources:\n" +
+    "1. StockTwits trending symbols — hottest stocks being discussed right now, with scores\n" +
+    "2. StockTwits per-ticker sentiment — bullish/bearish ratio from trader chat\n" +
+    "3. X/Twitter finfluencer accounts — curated list of market commentators (Citron, MarketWatch, etc.)\n" +
+    "Use this to discover retail momentum, viral tickers, and breaking catalyst chatter.",
+  parameters: Type.Object({}),
+  execute: async () => {
+    const watchlist = await getWatchlist();
+    const scans = await scanXSocial(watchlist);
+
+    if (scans.length === 0) {
+      return {
+        content: [{ type: "text", text: "No X/Twitter or StockTwits signals found." }],
+        details: { count: 0, scans: [] },
+      };
+    }
+
+    // Group by source
+    const bySource: Record<string, typeof scans> = {};
+    for (const s of scans) {
+      if (!bySource[s.source]) bySource[s.source] = [];
+      bySource[s.source].push(s);
+    }
+
+    const lines: string[] = [
+      "X / STOCKTWITS SOCIAL SCAN:",
+      "",
+    ];
+
+    // StockTwits trending
+    const trending = bySource["stocktwits_trending"] || [];
+    if (trending.length > 0) {
+      lines.push("📈 STOCKTWITS TRENDING SYMBOLS:");
+      for (const t of trending.slice(0, 15)) {
+        const score = t.payload.trending_score?.toFixed(2) || "?";
+        const wl = t.payload.watchlist_count?.toLocaleString() || "?";
+        const summary = t.payload.trend_summary ? ` — ${t.payload.trend_summary.slice(0, 120)}` : "";
+        lines.push(`  [${t.symbol}] score=${score} watchlist=${wl}${t.payload.sector ? ` sector=${t.payload.sector}` : ""}`);
+        if (summary) lines.push(`    ${summary}`);
+      }
+      lines.push("");
+    }
+
+    // StockTwits sentiment
+    const sentiment = bySource["stocktwits_sentiment"] || [];
+    if (sentiment.length > 0) {
+      lines.push("💬 STOCKTWITS SENTIMENT (watchlist):");
+      for (const s of sentiment.slice(0, 10)) {
+        const p = s.payload;
+        const ratio = ((p.ratio || 0) * 100).toFixed(0);
+        const dir = p.ratio > 0.6 ? "🐂 Bullish" : p.ratio < 0.4 ? "🐻 Bearish" : "➖ Neutral";
+        lines.push(`  [${s.symbol}] ${dir} (${ratio}% bullish, ${p.total} msgs)`);
+      }
+      lines.push("");
+    }
+
+    // Nitter finfluencer
+    const finfluencer = bySource["nitter_finfluencer"] || [];
+    if (finfluencer.length > 0) {
+      lines.push("🐦 X/TWITTER FINFLUENCER MENTIONS:");
+      for (const f of finfluencer.slice(0, 10)) {
+        const p = f.payload;
+        lines.push(`  [${f.symbol}] ${p.tweetCount} tweets from ${p.accountCount} account(s)`);
+        if (p.recentTweets?.length > 0) {
+          for (const t of p.recentTweets) {
+            lines.push(`    - ${t.account}: "${t.title.slice(0, 100)}"`);
+          }
+        }
+      }
+      lines.push("");
     }
 
     return {

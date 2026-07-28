@@ -13,6 +13,7 @@ import { scanYahooMarketMovers } from "../ingestion/discovery.js";
 import { fetchAllNews } from "../ingestion/expanded-news.js";
 import { fetchEdgarFilings, scoreFiling } from "../ingestion/edgar.js";
 import { scanRedditMentions } from "../ingestion/social.js";
+import { scanXSocial } from "../ingestion/x-social.js";
 import { scanRelativeVolume, scanPreMarketGaps, scanRangeBreaks, clearPriceCache } from "../ingestion/scanner.js";
 import { getDailyBars } from "../execution/alpaca.js";
 import { computeIndicators, generateTechnicalSignals } from "../analysis/technicals.js";
@@ -99,6 +100,9 @@ const _sourceHealth: Record<string, SourceHealth> = {
   gap: { name: "Pre-Market Gaps", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   range_break: { name: "Range Breaks", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   macro_sector: { name: "Macro/Sector", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  stocktwits_trending: { name: "StockTwits Trending", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  stocktwits_sentiment: { name: "StockTwits Sentiment", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
+  nitter_finfluencer: { name: "Nitter Finfluencer", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   fundamentals: { name: "Fundamentals", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
   technicals: { name: "Technical Scans", successes: 0, failures: 0, lastSuccess: null, lastFailure: null, lastError: null, consecutiveFailures: 0, enabled: true },
 };
@@ -324,6 +328,51 @@ async function ingestRedditMentions(store: SignalStore): Promise<void> {
 }
 
 /**
+ * Wire X/Twitter (StockTwits trending + Nitter finfluencer).
+ * Tracks sub-source health internally since it produces signals from 3 sources.
+ */
+async function ingestXSocial(store: SignalStore): Promise<void> {
+  const subSources = ["stocktwits_trending", "stocktwits_sentiment", "nitter_finfluencer"] as const;
+
+  try {
+    const scans = await scanXSocial(getScanTickers());
+    const signals: Array<Parameters<typeof store.recordSignals>[0][number]> = [];
+
+    // Track which sub-sources produced signals
+    const seenSources = new Set<string>();
+
+    for (const s of scans) {
+      seenSources.add(s.source);
+      signals.push({
+        ticker: s.symbol,
+        source: s.source,
+        score: s.score,
+        direction: s.direction,
+        payload: s.payload,
+      });
+    }
+
+    if (signals.length > 0) {
+      store.recordSignals(signals);
+    }
+
+    // Record health for each sub-source
+    for (const sub of subSources) {
+      if (seenSources.has(sub)) {
+        recordSourceSuccess(sub);
+      } else {
+        recordSourceFailure(sub, "No signals returned (may be blocked or empty)");
+      }
+    }
+  } catch (e: any) {
+    for (const sub of subSources) {
+      recordSourceFailure(sub, e.message);
+    }
+    console.warn("[RESEARCH] X social ingest failed:", e.message);
+  }
+}
+
+/**
  * Wire volume standouts.
  */
 /**
@@ -531,6 +580,7 @@ async function researchTick(): Promise<void> {
 
   // Run per-ticker scanners sequentially to share the price cache
   await trackedIngest("reddit", ingestRedditMentions)(store);
+  await trackedIngest("x_social", ingestXSocial)(store);
   await trackedIngest("volume_spike", ingestVolumeScans)(store);
   await trackedIngest("gap", ingestPreMarketGaps)(store);
   await trackedIngest("range_break", ingestRangeBreaks)(store);
