@@ -299,11 +299,13 @@ export class StrategyStore {
     return this.getById(id);
   }
 
-  /** Permanently delete old stale/failed strategies beyond retention period. */
+  /** Permanently delete old stale/failed strategies beyond retention period.
+   *  Only deletes strategies that never had a position (position_id IS NULL).
+   *  Strategies that were actually traded are kept for historical/learning purposes. */
   purgeRetained(days: number = 14) {
     const cutoff = new Date(Date.now() - days * 86400000).toISOString();
     const result = this.db.prepare(
-      "DELETE FROM strategies WHERE (state = 'stale' OR state = 'failed') AND updated_at < ?"
+      "DELETE FROM strategies WHERE state IN ('stale', 'failed') AND position_id IS NULL AND updated_at < ?"
     ).run(cutoff);
     return result.changes;
   }
@@ -397,8 +399,15 @@ export class StrategyStore {
     return counts;
   }
 
-  /** Get total count of strategies. */
-  getTotalCount(): number {
+  /** Get total count of strategies, optionally filtered by active states only.
+   *  When used for the strategist prompt, set activeOnly=true to skip failed/stale noise. */
+  getTotalCount(activeOnly: boolean = false): number {
+    if (activeOnly) {
+      const row = this.db.prepare(
+        "SELECT COUNT(*) as count FROM strategies WHERE state IN ('anticipated', 'developing', 'realized', 'active')"
+      ).get() as { count: number };
+      return row.count;
+    }
     const row = this.db.prepare("SELECT COUNT(*) as count FROM strategies").get() as { count: number };
     return row.count;
   }

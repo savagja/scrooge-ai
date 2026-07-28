@@ -120,7 +120,7 @@ async function generateStrategistReport(
   }
 
   // ── Check if there are any strategies at all ───────────────────────────
-  const total = strategies.getTotalCount();
+  const total = strategies.getTotalCount(true);
   if (total === 0) {
     lines.push("## ℹ️ No Active Strategies");
     lines.push("");
@@ -287,7 +287,7 @@ async function main() {
 
   // Initialize strategy store
   const strategies = new StrategyStore(cfg.research?.dbPath?.replace("research.db", "strategies.db") ?? "data/strategies.db");
-  console.log("Strategy store: data/strategies.db (" + strategies.getTotalCount() + " existing)");
+  console.log("Strategy store: data/strategies.db (" + strategies.getTotalCount() + " total, " + strategies.getTotalCount(true) + " active)");
 
   // Initialize portfolio state (for reading positions/memory only)
   const state = new PortfolioState(cfg.initialCapital);
@@ -418,8 +418,7 @@ async function runStrategistSession(
     "A:" + stateCounts.anticipated +
     " D:" + stateCounts.developing +
     " R:" + stateCounts.realized +
-    " F:" + stateCounts.failed +
-    " S:" + stateCounts.stale
+    " (" + (stateCounts.failed + stateCounts.stale) + " failed/stale)"
   );
 
   // Build session prompt based on session type
@@ -441,8 +440,8 @@ async function runStrategistSession(
       "   - Consolidate duplicate strategies for the same ticker/theme — merge into one\n" +
       "   - Archive strategies where catalyst has expired or thesis is invalidated\n" +
       "   - Promote to developing only when 2+ independent signals converge\n\n" +
-      "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing +
-      " | Total: " + strategies.getTotalCount() + "\n\n" +
+      "Current strategy counts: A=" + stateCounts.anticipated + " D=" + stateCounts.developing + " R=" + stateCounts.realized +
+      " | Total: " + strategies.getTotalCount(true) + " (active)" + (stateCounts.failed + stateCounts.stale > 0 ? " + " + (stateCounts.failed + stateCounts.stale) + " failed/stale" : "") + "\n\n" +
       "QUALITY OVER QUANTITY. One well-researched strategy beats 15 copies of the same idea. " +
       "Do not create strategies for tickers you already have strategies for unless the new thesis is fundamentally different.\n\n" +
       "OUTPUT FORMAT: Discuss strategies using `### TICKER —` headers followed by your narrative commentary. " +
