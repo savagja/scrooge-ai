@@ -9,7 +9,7 @@
  * KEPT (position-level safety):
  * - Hard stop loss (3% from entry)
  * - Trailing stop (5% below peak for longs, 5% above trough for shorts)
- * - Green threshold (+1% promotes to trailing, cancels time stop)
+ * - Green threshold (+1% promotes to trailing)
  * - Short squeeze protection (cover if price jumps 5% intraday)
  *
  * REMOVED (agent's domain):
@@ -98,16 +98,14 @@ export function getExitPlan(entryPrice: number, holdMinutes: number): {
  *
  * EXIT RULES (LONGS):
  * 1. Hard stop: Always exit if price <= entry * (1 - stopLossPct)
- * 2. Time stop: Only for "initial" status. If holdMinutes passes and not green, exit.
- * 3. Trailing stop: Once green, track highest price. Exit if price <= highest * (1 - trailingStopPct).
- * 4. Manual exit: Agent can always call place_sell_order.
+ * 2. Trailing stop: Once green, track highest price. Exit if price <= highest * (1 - trailingStopPct).
+ * 3. Manual exit: Agent can always call place_sell_order.
  *
  * EXIT RULES (SHORTS):
  * 1. Hard stop: Always exit if price >= entry * (1 + stopLossPct)  [price rose against you]
  * 2. Squeeze stop: Exit if price rises > shortSqueezeThreshold intraday (sudden move protection)
- * 3. Time stop: Only for "initial" status. If holdMinutes passes and not green, exit.
- * 4. Trailing stop: Once green (price dropped), track lowest price. Exit if price >= lowest * (1 + trailingStopPct).
- * 5. Manual exit: Agent can always call place_sell_order.
+ * 3. Trailing stop: Once green (price dropped), track lowest price. Exit if price >= lowest * (1 + trailingStopPct).
+ * 4. Manual exit: Agent can always call place_sell_order.
  */
 export function checkExitConditions(params: {
   position: Position;
@@ -143,7 +141,7 @@ function checkLongExitConditions(
     const initialTrailing = Math.round(price * (1 - cfg.risk.trailingStopPct) * 100) / 100;
     return {
       shouldExit: false,
-      reason: `Position went GREEN (+${(profitPct * 100).toFixed(2)}%). Trailing stop activated at $${initialTrailing.toFixed(2)}. Time stop CANCELLED. Holding indefinitely.`,
+      reason: `Position went GREEN (+${(profitPct * 100).toFixed(2)}%). Trailing stop activated at $${initialTrailing.toFixed(2)}. Holding indefinitely.`,
       newStatus: "green",
       newTrailingStop: initialTrailing,
       newHighestPrice: price,
@@ -172,15 +170,12 @@ function checkLongExitConditions(
     return { shouldExit: false, reason: `Holding. Trailing stop: $${trailing.toFixed(2)}. Peak: $${highest.toFixed(2)}.` };
   }
 
-  // 4. Time stop (only for "initial" status)
-  const holdUntil = new Date(pos.holdUntil);
-  if (Date.now() >= holdUntil.getTime()) {
-    return { shouldExit: true, reason: `Time stop reached (${cfg.signal.holdMinutes} min). Position never went green. Cutting.` };
-  }
-
+  // 4. No time stop — the agent has full discretion over when to exit.
+  // The hard stop and trailing stop provide safety. The agent can hold
+  // as long as the thesis is intact.
   return {
     shouldExit: false,
-    reason: `Initial hold. Time stop in ${Math.max(0, Math.round((holdUntil.getTime() - Date.now()) / 60000))} min. Need +${(cfg.risk.greenThreshold * 100).toFixed(0)}% to promote to trailing.`,
+    reason: `Holding. Position is in initial status. No time limit — agent has full discretion. Hard stop at $${hardStop.toFixed(2)}. Need +${(cfg.risk.greenThreshold * 100).toFixed(0)}% to activate trailing stop.`,
   };
 }
 
@@ -211,7 +206,7 @@ function checkShortExitConditions(
     const initialTrailing = Math.round(price * (1 + cfg.risk.trailingStopPct) * 100) / 100;
     return {
       shouldExit: false,
-      reason: `Short went GREEN (price dropped ${(profitPct * 100).toFixed(2)}%). Trailing stop activated at $${initialTrailing.toFixed(2)} (cover if price rises to here). Time stop CANCELLED.`,
+      reason: `Short went GREEN (price dropped ${(profitPct * 100).toFixed(2)}%). Trailing stop activated at $${initialTrailing.toFixed(2)} (cover if price rises to here).`,
       newStatus: "green",
       newTrailingStop: initialTrailing,
       newLowestPrice: price,
@@ -240,14 +235,10 @@ function checkShortExitConditions(
     return { shouldExit: false, reason: `Holding short. Trailing stop: $${trailing.toFixed(2)}. Trough: $${lowest.toFixed(2)}.` };
   }
 
-  // 5. Time stop (only for "initial" status)
-  const holdUntil = new Date(pos.holdUntil);
-  if (Date.now() >= holdUntil.getTime()) {
-    return { shouldExit: true, reason: `Time stop (short) reached (${cfg.signal.holdMinutes} min). Position never went green. Covering.` };
-  }
-
+  // 5. No time stop — the agent has full discretion over when to exit a short.
+  // The hard stop, squeeze stop, and trailing stop provide safety.
   return {
     shouldExit: false,
-    reason: `Initial hold (short). Time stop in ${Math.max(0, Math.round((holdUntil.getTime() - Date.now()) / 60000))} min. Need price drop of ${(cfg.risk.greenThreshold * 100).toFixed(0)}% to promote to trailing.`,
+    reason: `Holding short position in initial status. No time limit — agent has full discretion. Hard stop at $${hardStop.toFixed(2)}. Need price drop of ${(cfg.risk.greenThreshold * 100).toFixed(0)}% to activate trailing stop.`,
   };
 }

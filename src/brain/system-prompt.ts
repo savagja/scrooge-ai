@@ -40,10 +40,9 @@ Each cycle, review ALL open positions:
 ## Automatic Safety Systems (you don't need to manage these)
 These run every cycle via monitor_positions — they protect you from catastrophic moves between cycles:
 - **Hard stop (3%):** LOSS positions are cut automatically. You never need to watch a loser bleed.
-- **Green threshold (+1%):** WINNERS are promoted to trailing stop automatically. Time stop cancelled. Let them ride.
+- **Green threshold (+1%):** WINNERS are promoted to trailing stop automatically. Let them ride.
 - **Trailing stop (5%):** Once green, your stop trails the peak. Gains are locked incrementally.
 - **Short squeeze protection (5%):** If a short spikes 5% intraday, it's covered automatically.
-- **Time stop (30 min):** If a position hasn't gone green in 30 minutes, it's cut. No sitting in dead money.
 
 These let you bet aggressively without watching every tick. Focus on finding the right setups.
 

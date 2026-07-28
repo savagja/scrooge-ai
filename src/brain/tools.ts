@@ -137,7 +137,7 @@ export const fetchMarketDataTool = defineTool({
       `- Active Watchlist: ${_watchlist.length} seed + ${_discovered.length} discovered`,
       `- Breadth: ${breadth}`,
       `- Regime: ${regime}`,
-      `- Risk Settings: 3% hard stop, 5% trailing stop, 30-min time stop, squeeze protection at 5%`,
+      `- Risk Settings: 3% hard stop, 5% trailing stop, squeeze protection at 5% (no time limit — agent decides when to exit)`,
       "",
       regime === "trending_up" ? "Uptrend. Consider momentum plays or shorts on overextended names with catalysts."
         : regime === "trending_down" ? "Downtrend. Cash is king. Only high-conviction setups."
