@@ -52,6 +52,15 @@ Each strategy needs:
 - Key signals: IDs from the research DB that support this (from search_signals results)
 - Risk factors: What could invalidate the thesis
 
+### Low-Signal Market Playbook (VIX < 18, chop regime, no strong clusters)
+When the market is quiet and cross-source clusters are sparse, try these alternative approaches:
+1. **Mean reversion on oversold names** — Look for tickers down 3+ days in a row with RSI < 35 and a catalyst (news, sector rotation). Use scan_relative_volume + search_signals + news.
+2. **Earnings drift / gap fill** — Tickers that gapped up on earnings 2-5 days ago and are retracing to fill the gap can offer mean reversion entries. Check news for earnings context.
+3. **Defensive sector plays** — In trending_down, find tickers in staples (XLP), healthcare (XLV), defense that are holding support. Use search_sector_signals for rotation data.
+4. **Institutional accumulation** — Tickers with consistent relative volume > 1.5x across multiple days without a price spike suggest quiet accumulation. Use scan_relative_volume with different time windows.
+5. **Sector rotation** — Even in chop, money rotates. Check search_sector_signals for sectors with increasing activity. Create strategies for the strongest names in rotating sectors.
+If none of these yield anything, it's fine to report "no actionable setups" — cash is a position.
+
 ## Lifecycle Management — MUST DO EVERY CYCLE
 Each cycle, your FIRST job is to clean up existing strategies. Creating new ones is SECONDARY.
 
