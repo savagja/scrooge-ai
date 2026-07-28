@@ -139,6 +139,7 @@ ssh <user>@<host>
 cd scrooge
 git pull                     # fetch latest code
 npm install                  # new/updated deps
+npm rebuild                  # rebuild native modules (needed on Pi ARM)
 sudo systemctl restart scrooge-trader scrooge-strategist
 ```
 
