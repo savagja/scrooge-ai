@@ -6,21 +6,25 @@
  * this context as part of its prompt, then uses tools to dive deeper on
  * whatever it finds interesting.
  *
- * Sources gathered per cycle (lightweight):
- *   1. Market state (VIX, SPY, regime) — already done, enhanced here
- *   2. Sector-level movers (using Yahoo Finance day gainers/losers by sector)
- *   3. Top headlines from Alpaca news (watchlist + discovered tickers, max 5)
- *   4. EDGAR filing highlights (max 3 most impactful)
- *   5. Watchlist relative volume standouts (max 5 biggest volume spikes)
- *   6. Reddit velocity highlights (max 3 tickers with accelerating mentions)
- *   7. Pre-market gap highlights (max 3)
+ * Sources gathered per cycle (two tiers):
+ *
+ * TIER 1 — Every cycle, fast only (10s timeout, ~3s typical):
+ *   1. Market state (VIX, SPY, regime) — cached 5-10 min between cycles
+ *   2. Top headlines from Alpaca news (watchlist + discovered tickers, max 5)
+ *   3. Watchlist relative volume standouts (max 5 biggest volume spikes)
+ *   4. Pre-market gap highlights (max 3)
+ *   5. Sector-level movers (Yahoo gainers/losers) — cached 10 min
+ *
+ * TIER 2 — Cached between cycles (strategist-only data, not for trader):
+ *   6. EDGAR filing highlights (max 3) — cached 1 hour
+ *   7. Reddit velocity highlights — cached 30 min
  *
  * ROLLING CONTEXT: Each cycle's context is stored in a ring buffer. Every
  * subsequent call compares the latest context to the previous one and generates
  * a "What Changed" section highlighting shifts, trends, and repeat appearances.
  *
- * Design: All fetches are parallel, with individual try/catch so one failure
- * doesn't kill the whole context. Total time target: < 2 seconds.
+ * Design: All tier-1 fetches are parallel with 10s AbortController timeouts.
+ * Tier-2 data is refreshed from a simple interval cache. Total time target: < 3s.
  */
 
 import { getVix, getSpyChange } from "../ingestion/market.js";
@@ -83,6 +87,35 @@ export interface MarketContext {
     gapPct: number;
     preMarketPrice: number;
   }>;
+}
+
+// ─── Simple Interval Cache for Tier-2 (slow/strategist-only) data ────────────
+
+const _cache: Record<string, { value: any; ts: number }> = {};
+
+function getCached<T>(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {
+  const cached = _cache[key];
+  if (cached && Date.now() - cached.ts < ttlMs) {
+    return Promise.resolve(cached.value as T);
+  }
+  return fetcher().then(val => {
+    _cache[key] = { value: val, ts: Date.now() };
+    return val;
+  }).catch(err => {
+    // Return stale cache on error, or empty if never cached
+    if (cached) return cached.value as T;
+    throw err;
+  });
+}
+
+// ─── AbortController wrapper for fetch timeouts ─────────────────────────────
+
+function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number } = {}): Promise<Response> {
+  const timeout = options.timeout ?? 10000;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id));
 }
 
 // ─── Rolling Context Buffer ──────────────────────────────────────────────────
@@ -251,21 +284,29 @@ export async function buildMarketContext(
 ): Promise<MarketContext> {
   const startTime = Date.now();
 
-  // ── Fire all fetches in parallel ──────────────────────────────────────────
-  const [vixPromise, spyPromise, newsPromise, edgarPromise, volumePromise, redditPromise, gapsPromise, yahooPromise] =
-    [getVix(), getSpyChange(), fetchNews(watchlist, 10), fetchEdgarFilings(watchlist), scanRelativeVolume(watchlist), scanRedditMentions(watchlist), scanPreMarketGaps(watchlist), scanYahooMarketMovers(50)];
+  // ── Helper: add a timeout to any promise ────────────────────────────────
+  function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)),
+    ]).catch(() => fallback);
+  }
 
-  // Settle all with individual error handling
-  const vix = await vixPromise.catch(() => null);
-  const spyChange = await spyPromise.catch(() => null);
-  const news = await newsPromise.catch<Awaited<ReturnType<typeof fetchNews>>>(() => []);
-  const edgarEntries = await edgarPromise.catch<Awaited<ReturnType<typeof fetchEdgarFilings>>>(() => []);
-  const volumeScans = await volumePromise.catch<Awaited<ReturnType<typeof scanRelativeVolume>>>(() => []);
-  const redditScans = await redditPromise.catch<Awaited<ReturnType<typeof scanRedditMentions>>>(() => []);
-  const gapScans = await gapsPromise.catch<Awaited<ReturnType<typeof scanPreMarketGaps>>>(() => []);
-  const yahooMovers = await yahooPromise.catch<Awaited<ReturnType<typeof scanYahooMarketMovers>>>(() => ({
-    mostActive: [], gainers: [], losers: [], trending: [],
-  }));
+  // ── TIER 1: Fast fetches every cycle (10s timeout) ───────────────────────
+  const [vix, spyChange, news, volumeScans, gaps] = await Promise.all([
+    withTimeout(getVix(), 10000, null),
+    withTimeout(getSpyChange(), 10000, null),
+    withTimeout(fetchNews(watchlist, 10), 10000, [] as Awaited<ReturnType<typeof fetchNews>>),
+    withTimeout(scanRelativeVolume(watchlist), 10000, [] as Awaited<ReturnType<typeof scanRelativeVolume>>),
+    withTimeout(scanPreMarketGaps(watchlist), 10000, [] as Awaited<ReturnType<typeof scanPreMarketGaps>>),
+  ]);
+
+  // ── TIER 2: Slow/cached sources (strategist-only data, cached between cycles) ──
+  const [edgarEntries, redditScans, yahooMovers] = await Promise.all([
+    getCached('edgar', 3600000, () => fetchEdgarFilings(watchlist)),        // 1 hour cache
+    getCached('reddit', 1800000, () => scanRedditMentions(watchlist)),      // 30 min cache
+    getCached('yahoo_movers', 600000, () => scanYahooMarketMovers(50)),     // 10 min cache
+  ]);
 
   // ── Build each section ────────────────────────────────────────────────────
 
@@ -342,10 +383,10 @@ export async function buildMarketContext(
     }));
 
   // 7. Pre-market gaps (max 3, sorted by magnitude)
-  const preMarketGaps = gapScans
-    .sort((a, b) => Math.abs(b.gapPct) - Math.abs(a.gapPct))
+  const preMarketGaps = (gaps as any[])
+    .sort((a: any, b: any) => Math.abs(b.gapPct) - Math.abs(a.gapPct))
     .slice(0, 3)
-    .map((g) => ({
+    .map((g: any) => ({
       symbol: g.symbol,
       gapPct: Math.round(g.gapPct * 100) / 100,
       preMarketPrice: Math.round(g.preMarketPrice * 100) / 100,
