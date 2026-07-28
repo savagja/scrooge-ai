@@ -65,6 +65,9 @@ EnvironmentFile=/home/<user>/scrooge/.env
 ExecStart=/usr/bin/npx tsx strategist.ts
 Restart=on-failure
 RestartSec=30
+RestartMaxDelaySec=300
+StartLimitInterval=300
+StartLimitBurst=10
 StandardOutput=append:/home/<user>/scrooge/logs/strategist.log
 StandardError=append:/home/<user>/scrooge/logs/strategist.log
 
@@ -89,6 +92,9 @@ EnvironmentFile=/home/<user>/scrooge/.env
 ExecStart=/usr/bin/npx tsx trader.ts
 Restart=on-failure
 RestartSec=30
+RestartMaxDelaySec=300
+StartLimitInterval=300
+StartLimitBurst=10
 StandardOutput=append:/home/<user>/scrooge/logs/trader.log
 StandardError=append:/home/<user>/scrooge/logs/trader.log
 

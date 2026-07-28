@@ -15,6 +15,15 @@
 import { config } from "dotenv";
 config();
 
+// Catch unhandled promise rejections so a single Yahoo timeout or Alpaca blip
+// doesn't crash the entire trader process.
+process.on("unhandledRejection", (reason: any) => {
+  console.warn(`⚠️  Unhandled rejection (non-fatal): ${reason?.message ?? reason}`);
+});
+process.on("uncaughtException", (err: any) => {
+  console.warn(`⚠️  Uncaught exception (non-fatal): ${err?.message ?? err}`);
+});
+
 import { getConfig, reloadConfig, getTradingDate } from "./config.js";
 import { createTradingBrain } from "./brain/agent.js";
 import { setGlobalState, setStrategyStore, requireState, getWatchlist } from "./brain/tools.js";
@@ -262,7 +271,8 @@ async function main(isRetry = false) {
     // The strategist provides strategies, the perception prompt provides context.
     // A special "first turn" adds nothing but token cost and confusion.
 
-    // Continuous loop
+    // Continuous loop. Each cycle is wrapped in its own try/catch so
+    // a single failed fetch (Yahoo timeout, Alpaca blip) doesn't kill the entire process.
     while (true) {
       loopCount++;
 
@@ -358,14 +368,21 @@ async function main(isRetry = false) {
 
       console.log(`[${now}] 📡 Cycle ${loopCount} — perception sent...`);
 
-      await session.prompt(perceptionPrompt);
+      try {
+        await session.prompt(perceptionPrompt);
+      } catch (promptErr: any) {
+        console.error(`[${now}] ⚠️  Agent cycle ${loopCount} failed (continuing loop):`, promptErr.message ?? promptErr);
+        state.recordActivity("cycle_error", `Cycle ${loopCount} failed: ${promptErr.message ?? "unknown error"}`, {
+          metadata: { cycle: loopCount },
+        });
+      }
 
       if (loopCount % 10 === 0) {
         console.log(`[${now}] 💓 Heartbeat | Positions: ${state.getPositions().length} | P&L: $${state.getDailyPnL().toFixed(2)} | Cash: $${state.getCash().toFixed(2)}`);
       }
     }
   } catch (err) {
-    console.error("\n💥 Fatal error:", err);
+    console.error("\n💥 Fatal error (event loop exited):", err);
   } finally {
     // ── MARKET CLOSE: Run daily retrospective ────────────────────────────
     // NOTE: The standalone retrospective process (cron job) is the primary

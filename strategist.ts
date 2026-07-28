@@ -12,6 +12,15 @@
 import { config } from "dotenv";
 config();
 
+// Catch unhandled promise rejections so a single Yahoo timeout or Alpaca blip
+// doesn't crash the entire strategist process.
+process.on("unhandledRejection", (reason: any) => {
+  console.warn(`⚠️  Strategist unhandled rejection (non-fatal): ${reason?.message ?? reason}`);
+});
+process.on("uncaughtException", (err: any) => {
+  console.warn(`⚠️  Strategist uncaught exception (non-fatal): ${err?.message ?? err}`);
+});
+
 import { getConfig, reloadConfig } from "./src/config.js";
 import { createStrategistBrain } from "./src/brain/strategist-agent.js";
 import { setStrategistState } from "./src/brain/strategist-tools.js";
@@ -341,38 +350,41 @@ async function main() {
       reloadConfig();
     }
 
-    const clock = await getClock();
-    const now = new Date().toISOString();
+    try {
+      const clock = await getClock();
+      const now = new Date().toISOString();
 
-    if (!clock.isOpen) {
-      // ── MARKET CLOSED ────────────────────────────────────────────────
-      // Check if we're in the pre-market window (30 min before open)
-      const msToOpen = new Date(clock.nextOpen).getTime() - Date.now();
-      const minutesToOpen = msToOpen / 60000;
+      if (!clock.isOpen) {
+        // ── MARKET CLOSED ────────────────────────────────────────────────
+        // Check if we're in the pre-market window (30 min before open)
+        const msToOpen = new Date(clock.nextOpen).getTime() - Date.now();
+        const minutesToOpen = msToOpen / 60000;
 
-      if (minutesToOpen <= 30 && minutesToOpen > 0 && cycleNumber % 3 === 0) {
-        console.log("[" + now + "] Pre-market window (" + minutesToOpen.toFixed(0) + " min to open) — running strategist...");
-        await runStrategistSession(state, strategies, cfg, "pre-market", cycleNumber);
-      } else if (minutesToOpen < 0) {
-        // Market has closed — we're in after-hours
-        console.log("[" + now + "] Market closed. Strategist sleeping until pre-market window.");
-        console.log("  Next open: " + clock.nextOpen);
-        // Sleep for 5 minutes before checking again
-        await new Promise(r => setTimeout(r, 300000));
-        continue;
+        if (minutesToOpen <= 30 && minutesToOpen > 0 && cycleNumber % 3 === 0) {
+          console.log("[" + now + "] Pre-market window (" + minutesToOpen.toFixed(0) + " min to open) — running strategist...");
+          await runStrategistSession(state, strategies, cfg, "pre-market", cycleNumber);
+        } else if (minutesToOpen < 0) {
+          // Market has closed — we're in after-hours
+          console.log("[" + now + "] Market closed. Strategist sleeping until pre-market window.");
+          console.log("  Next open: " + clock.nextOpen);
+          await new Promise(r => setTimeout(r, 300000));
+          continue;
+        } else {
+          // Regular closed hours
+          console.log("[" + now + "] Market closed. Next open: " + clock.nextOpen + " (" + minutesToOpen.toFixed(0) + " min)");
+          await new Promise(r => setTimeout(r, 300000));
+          continue;
+        }
       } else {
-        // Regular closed hours
-        console.log("[" + now + "] Market closed. Next open: " + clock.nextOpen + " (" + minutesToOpen.toFixed(0) + " min)");
-        await new Promise(r => setTimeout(r, 300000));
-        continue;
+        // ── MARKET OPEN ──────────────────────────────────────────────────
+        if (cycleNumber % 6 === 0 || cycleNumber === 1) {
+          console.log("[" + now + "] Market open — running strategist cycle " + cycleNumber + "...");
+          await runStrategistSession(state, strategies, cfg, "mid-session", cycleNumber);
+        }
       }
-    } else {
-      // ── MARKET OPEN ──────────────────────────────────────────────────
-      // Run strategist every N cycles (e.g., every 6th ~= every 12 min)
-      if (cycleNumber % 6 === 0 || cycleNumber === 1) {
-        console.log("[" + now + "] Market open — running strategist cycle " + cycleNumber + "...");
-        await runStrategistSession(state, strategies, cfg, "mid-session", cycleNumber);
-      }
+    } catch (cycleErr: any) {
+      // Individual cycle crashed (network timeout, API error, etc.) — log and continue
+      console.error("[" + new Date().toISOString() + "] ⚠️  Strategist cycle " + cycleNumber + " failed (continuing loop):", cycleErr.message ?? cycleErr);
     }
 
     // Sleep for the poll interval

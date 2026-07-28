@@ -146,32 +146,42 @@ export async function scanYahooMarketMovers(
 
 /**
  * Filter discovered tickers to only those tradeable on Alpaca with fractional shares.
+ * If Alpaca is unreachable, returns all tickers (assumes eligible) rather than crashing.
  */
 export async function filterFractionalEligible(
   tickers: Array<{ symbol: string; [key: string]: any }>
 ): Promise<any[]> {
-  // Check in parallel batches to avoid rate limits
-  const batchSize = 5;
-  const eligible: any[] = [];
+  try {
+    // Check in parallel batches to avoid rate limits
+    const batchSize = 5;
+    const eligible: any[] = [];
 
-  for (let i = 0; i < tickers.length; i += batchSize) {
-    const batch = tickers.slice(i, i + batchSize);
-    const checks = await Promise.all(
-      batch.map(async (t) => {
-        const ok = await isFractionalEligible(t.symbol);
-        return { t, ok };
-      })
-    );
-    for (const { t, ok } of checks) {
-      if (ok) eligible.push(t);
+    for (let i = 0; i < tickers.length; i += batchSize) {
+      const batch = tickers.slice(i, i + batchSize);
+      const checks = await Promise.all(
+        batch.map(async (t) => {
+          try {
+            const ok = await isFractionalEligible(t.symbol);
+            return { t, ok };
+          } catch {
+            return { t, ok: true }; // Assume eligible on error
+          }
+        })
+      );
+      for (const { t, ok } of checks) {
+        if (ok) eligible.push(t);
+      }
+      // Small delay between batches
+      if (i + batchSize < tickers.length) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
     }
-    // Small delay between batches
-    if (i + batchSize < tickers.length) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+
+    return eligible;
+  } catch {
+    // Entire filter failed (network issue) — return all tickers as eligible
+    return tickers;
   }
-
-  return eligible;
 }
 
 /**
@@ -192,93 +202,98 @@ export async function discoverOpportunities(
   }>;
   sourceCounts: Record<string, number>;
 }> {
-  const movers = await scanYahooMarketMovers(50);
-  const candidates: Record<string, any> = {};
+  try {
+    const movers = await scanYahooMarketMovers(50);
+    const candidates: Record<string, any> = {};
 
-  // Build candidate pool from all sources
-  for (const m of movers.mostActive.slice(0, 30)) {
-    if (m.price < 1) continue; // Skip penny stocks
-    candidates[m.symbol] = {
-      ...m,
-      sources: new Set(["mostActive"]),
-      reasons: ["High volume"],
-    };
-  }
-
-  for (const g of movers.gainers.slice(0, 20)) {
-    if (g.price < 1) continue;
-    if (candidates[g.symbol]) {
-      candidates[g.symbol].sources.add("gainers");
-      candidates[g.symbol].reasons.push(`Up ${g.changePct.toFixed(1)}% today`);
-    } else {
-      candidates[g.symbol] = {
-        ...g,
-        sources: new Set(["gainers"]),
-        reasons: [`Up ${g.changePct.toFixed(1)}% today`],
+    // Build candidate pool from all sources
+    for (const m of movers.mostActive.slice(0, 30)) {
+      if (m.price < 1) continue;
+      candidates[m.symbol] = {
+        ...m,
+        sources: new Set(["mostActive"]),
+        reasons: ["High volume"],
       };
     }
-  }
 
-  for (const l of movers.losers.slice(0, 20)) {
-    if (l.price < 1) continue;
-    if (candidates[l.symbol]) {
-      candidates[l.symbol].sources.add("losers");
-      candidates[l.symbol].reasons.push(`Down ${Math.abs(l.changePct).toFixed(1)}% today`);
-    } else {
-      candidates[l.symbol] = {
-        ...l,
-        sources: new Set(["losers"]),
-        reasons: [`Down ${Math.abs(l.changePct).toFixed(1)}% today`],
-      };
+    for (const g of movers.gainers.slice(0, 20)) {
+      if (g.price < 1) continue;
+      if (candidates[g.symbol]) {
+        candidates[g.symbol].sources.add("gainers");
+        candidates[g.symbol].reasons.push(`Up ${g.changePct.toFixed(1)}% today`);
+      } else {
+        candidates[g.symbol] = {
+          ...g,
+          sources: new Set(["gainers"]),
+          reasons: [`Up ${g.changePct.toFixed(1)}% today`],
+        };
+      }
     }
-  }
 
-  for (const t of movers.trending.slice(0, 20)) {
-    if (!candidates[t.symbol]) {
-      candidates[t.symbol] = {
-        symbol: t.symbol,
-        price: 0,
-        changePct: 0,
-        volume: 0,
-        sources: new Set(["trending"]),
-        reasons: ["Trending on Yahoo Finance"],
-      };
-    } else {
-      candidates[t.symbol].sources.add("trending");
-      candidates[t.symbol].reasons.push("Trending on Yahoo Finance");
+    for (const l of movers.losers.slice(0, 20)) {
+      if (l.price < 1) continue;
+      if (candidates[l.symbol]) {
+        candidates[l.symbol].sources.add("losers");
+        candidates[l.symbol].reasons.push(`Down ${Math.abs(l.changePct).toFixed(1)}% today`);
+      } else {
+        candidates[l.symbol] = {
+          ...l,
+          sources: new Set(["losers"]),
+          reasons: [`Down ${Math.abs(l.changePct).toFixed(1)}% today`],
+        };
+      }
     }
-  }
 
-  // Exclude existing watchlist
-  const uniqueCandidates = Object.values(candidates).filter(
-    (c: any) => !existingWatchlist.includes(c.symbol.toUpperCase())
-  );
-
-  // Score by cross-source mentions
-  uniqueCandidates.sort((a: any, b: any) => b.sources.size - a.sources.size);
-
-  // Filter to fractional-eligible
-  const topCandidates = uniqueCandidates.slice(0, maxResults * 2);
-  const eligible = await filterFractionalEligible(topCandidates);
-
-  // Build final result
-  const discovered = eligible.slice(0, maxResults).map((c: any) => ({
-    symbol: c.symbol,
-    source: Array.from(c.sources).join(", "),
-    price: Math.round(c.price * 100) / 100,
-    changePct: Math.round(c.changePct * 100) / 100,
-    volume: c.volume,
-    reason: c.reasons.slice(0, 2).join("; "),
-  }));
-
-  const sourceCounts: Record<string, number> = {};
-  for (const d of discovered) {
-    for (const s of d.source.split(", ")) {
-      sourceCounts[s] = (sourceCounts[s] || 0) + 1;
+    for (const t of movers.trending.slice(0, 20)) {
+      if (!candidates[t.symbol]) {
+        candidates[t.symbol] = {
+          symbol: t.symbol,
+          price: 0,
+          changePct: 0,
+          volume: 0,
+          sources: new Set(["trending"]),
+          reasons: ["Trending on Yahoo Finance"],
+        };
+      } else {
+        candidates[t.symbol].sources.add("trending");
+        candidates[t.symbol].reasons.push("Trending on Yahoo Finance");
+      }
     }
-  }
 
-  return { discovered, sourceCounts };
+    // Exclude existing watchlist
+    const uniqueCandidates = Object.values(candidates).filter(
+      (c: any) => !existingWatchlist.includes(c.symbol.toUpperCase())
+    );
+
+    // Score by cross-source mentions
+    uniqueCandidates.sort((a: any, b: any) => b.sources.size - a.sources.size);
+
+    // Filter to fractional-eligible
+    const topCandidates = uniqueCandidates.slice(0, maxResults * 2);
+    const eligible = await filterFractionalEligible(topCandidates);
+
+    // Build final result
+    const discovered = eligible.slice(0, maxResults).map((c: any) => ({
+      symbol: c.symbol,
+      source: Array.from(c.sources).join(", "),
+      price: Math.round(c.price * 100) / 100,
+      changePct: Math.round(c.changePct * 100) / 100,
+      volume: c.volume,
+      reason: c.reasons.slice(0, 2).join("; "),
+    }));
+
+    const sourceCounts: Record<string, number> = {};
+    for (const d of discovered) {
+      for (const s of d.source.split(", ")) {
+        sourceCounts[s] = (sourceCounts[s] || 0) + 1;
+      }
+    }
+
+    return { discovered, sourceCounts };
+  } catch {
+    // Network error fetching Yahoo/Alpaca data — return empty results
+    return { discovered: [], sourceCounts: {} };
+  }
 }
 
 /**
@@ -293,9 +308,13 @@ export async function getActiveWatchlist(
   const active = new Set(seedWatchlist.map((s) => s.toUpperCase()));
 
   // Add discovered tickers
-  const { discovered } = await discoverOpportunities(seedWatchlist, maxDiscovered);
-  for (const d of discovered) {
-    active.add(d.symbol.toUpperCase());
+  try {
+    const { discovered } = await discoverOpportunities(seedWatchlist, maxDiscovered);
+    for (const d of discovered) {
+      active.add(d.symbol.toUpperCase());
+    }
+  } catch {
+    // Discovery failed — just use the seed list
   }
 
   return Array.from(active);

@@ -160,6 +160,30 @@ The bridge between strategist and trader is `data/strategies.db` — a SQLite da
 
 **⚠️ The deployed server is the canonical data source.** Always pull production state from the deployed server, not from the local `data/` directory.
 
+### 🔧 Fix Workflow (Important)
+
+All code changes are made **locally** in this repo, committed, and pushed to GitHub.
+The deployed Pi pulls from GitHub and restarts its services. **Never SSH into the Pi
+and edit files directly** — that creates drift between the repo and the running code.
+
+```bash
+# 1. Fix code locally
+# 2. Commit and push
+cd ~/Projects/scrooge
+git add .
+git commit -m "fix: description"
+git push
+
+# 3. Pull and restart on the Pi
+ssh admin@192.168.50.42
+cd scrooge
+git pull
+sudo systemctl restart scrooge-trader scrooge-strategist
+```
+
+This applies to ALL fixes — crash resilience, strategy logic, tool behavior, config changes.
+If the running code has a problem, the fix starts with a local edit, not a server patch.
+
 ---
 
 ## 📋 [Context Specs](docs/context-specs.md)

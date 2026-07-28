@@ -314,7 +314,8 @@ export type ActivityEventType =
   | "retrospective"
   | "system"
   | "decision"
-  | "what_if";
+  | "what_if"
+  | "cycle_error";
 
 export interface ActivityEvent {
   id: string;
