@@ -404,6 +404,29 @@ async function main(isRetry = false) {
     }
 
     session.dispose();
+
+    // ── WAIT FOR NEXT MARKET OPEN ────────────────────────────────────────
+    // After the event loop exits (market closed), don't let the process die.
+    // Poll Alpaca clock until market re-opens, then restart the event loop.
+    // This keeps the trader alive across multiple trading days without a
+    // systemd restart cycle.
+    console.log(`\n⏰ Waiting for next market open...`);
+    while (true) {
+      await new Promise(r => setTimeout(r, cfg.pollIntervalMs));
+      try {
+        const nextClock = await getClock();
+        if (nextClock.isOpen) {
+          console.log(`\n✅ Market is OPEN — re-entering event loop.`);
+          break;
+        }
+      } catch {
+        // Clock fetch failed — retry next cycle
+      }
+    }
+
+    // Recursively re-enter main() — this preserves the research engine
+    // and re-creates the agent session for the new trading day.
+    return main(true);
   }
 }
 
