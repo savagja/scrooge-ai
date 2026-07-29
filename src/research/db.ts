@@ -58,7 +58,10 @@ export type SignalSource =
   | "volume_spike"
   | "gap"
   | "range_break"
-  | "technicals";
+  | "technicals"
+  | "stocktwits_trending"
+  | "stocktwits_sentiment"
+  | "nitter_finfluencer";
 
 export type CorporateEventType =
   | "earnings"
@@ -200,15 +203,18 @@ const SCHEMA_SQL = [
     ticker             TEXT NOT NULL,
     as_of_date         TEXT NOT NULL,
     source             TEXT NOT NULL,
-    market_cap         REAL, pe_ratio     REAL, forward_pe    REAL,
+    market_cap         REAL, enterprise_value REAL, pe_ratio     REAL, forward_pe    REAL,
     ps_ratio          REAL, pb_ratio     REAL, ev_to_ebitda  REAL,
     total_cash        REAL, total_debt   REAL, book_value    REAL,
-    free_cash_flow    REAL, current_ratio REAL, debt_to_equity REAL,
+    free_cash_flow    REAL, operating_cash_flow REAL, current_ratio REAL, debt_to_equity REAL,
     revenue_ttm       REAL, gross_margin REAL, operating_margin REAL,
-    net_margin        REAL, eps_ttm      REAL, eps_growth_yoy REAL,
+    net_margin        REAL, eps_ttm      REAL, eps_forward   REAL, eps_growth_yoy REAL,
     revenue_growth_yoy REAL,
-    avg_volume_20d    REAL, avg_volume_50d REAL, rsi_14        REAL,
+    dividend_yield    REAL, dividend_rate REAL, payout_ratio  REAL,
+    avg_volume_10d    REAL, avg_volume_30d REAL, avg_volume_20d REAL, rsi_14        REAL,
     sma_20            REAL, sma_50       REAL, sma_200       REAL,
+    fifty_two_week_high REAL, fifty_two_week_low REAL,
+    fifty_day_average REAL, two_hundred_day_average REAL,
     volatility_30d    REAL, beta          REAL,
     sector_median_pe  REAL, sector_median_ps REAL,
     sector_avg_beta   REAL, sector_momentum REAL,

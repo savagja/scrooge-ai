@@ -305,6 +305,172 @@ export const getTickerTechnicalsTool = defineTool({
   },
 });
 
+// ── Strategist-only: screen_by_fundamentals ────────────────────────────────
+
+/**
+ * Screen the fundamentals database for tickers matching value/quality criteria.
+ * This is how the strategist finds long-term value stocks (KO, PG, JNJ, etc.)
+ * that don't generate short-term signal activity.
+ *
+ * The fundamentals table is populated daily from Yahoo Finance (P/E, market cap,
+ * dividend yield, beta, margins, etc.) for ~100 tickers including:
+ *   - Watchlist tickers
+ *   - ~75 value seed tickers (blue chips, dividend aristocrats, defensive sectors)
+ *   - Recently active tickers from the research DB
+ *
+ * Returns a formatted list of matching tickers with their fundamental data.
+ */
+export const screenByFundamentalsTool = defineTool({
+  name: "screen_by_fundamentals",
+  label: "Screen by Fundamentals",
+  description:
+    "Search the fundamentals database for tickers matching value or quality criteria. " +
+    "Use this to find long-term value stocks that don't generate short-term price signals. " +
+    "Filters: min/max P/E ratio, min market cap, min dividend yield, max beta, " +
+    "min/max price-to-book, sector, positive/negative EPS growth, positive free cash flow. " +
+    "The database covers ~100 tickers including blue-chips, dividend aristocrats, and defensive sectors. " +
+    "Returns: ticker, name, sector, P/E, market cap, dividend yield, beta, EPS growth, and price context.",
+  parameters: Type.Object({
+    minPe: Type.Optional(NumStr),
+    maxPe: Type.Optional(NumStr),
+    minMarketCap: Type.Optional(NumStr), // in billions
+    maxMarketCap: Type.Optional(NumStr), // in billions
+    minDividendYield: Type.Optional(NumStr), // e.g., 0.01 = 1%
+    maxDividendYield: Type.Optional(NumStr),
+    maxBeta: Type.Optional(NumStr),
+    minBeta: Type.Optional(NumStr),
+    minPb: Type.Optional(NumStr),
+    maxPb: Type.Optional(NumStr),
+    sector: Type.Optional(Type.String({ description: "Filter by sector (e.g., 'Consumer Staples', 'Healthcare', 'Utilities', 'Technology')" })),
+    minEpsGrowth: Type.Optional(NumStr), // e.g., 0.05 = 5%
+    positiveFcf: Type.Optional(Type.Boolean({ description: "Only tickers with positive free cash flow" })),
+    lowDebt: Type.Optional(Type.Boolean({ description: "Only tickers with total_debt < total_cash (net cash positive)" })),
+    limit: Type.Optional(NumStr),
+  }),
+  execute: async (_id: string, params: any) => {
+    try {
+      const store = getSignalStore();
+      if (!store) return text("Research DB not available.");
+
+      // Build the SQL query dynamically
+      const conditions: string[] = [];
+      const bindings: any[] = [];
+
+      if (params.minPe !== undefined) {
+        conditions.push("f.pe_ratio >= ?");
+        bindings.push(coerceNumber(params.minPe, 0));
+      }
+      if (params.maxPe !== undefined) {
+        conditions.push("f.pe_ratio <= ?");
+        bindings.push(coerceNumber(params.maxPe, 999));
+      }
+      if (params.minMarketCap !== undefined) {
+        conditions.push("f.market_cap >= ?");
+        bindings.push(coerceNumber(params.minMarketCap, 0) * 1e9);
+      }
+      if (params.maxMarketCap !== undefined) {
+        conditions.push("f.market_cap <= ?");
+        bindings.push(coerceNumber(params.maxMarketCap, 99999) * 1e9);
+      }
+      if (params.minDividendYield !== undefined) {
+        conditions.push("f.dividend_yield >= ?");
+        bindings.push(coerceNumber(params.minDividendYield, 0));
+      }
+      if (params.maxDividendYield !== undefined) {
+        conditions.push("f.dividend_yield <= ?");
+        bindings.push(coerceNumber(params.maxDividendYield, 1));
+      }
+      if (params.maxBeta !== undefined) {
+        conditions.push("f.beta <= ?");
+        bindings.push(coerceNumber(params.maxBeta, 10));
+      }
+      if (params.minBeta !== undefined) {
+        conditions.push("f.beta >= ?");
+        bindings.push(coerceNumber(params.minBeta, -10));
+      }
+      if (params.minPb !== undefined) {
+        conditions.push("f.pb_ratio >= ?");
+        bindings.push(coerceNumber(params.minPb, 0));
+      }
+      if (params.maxPb !== undefined) {
+        conditions.push("f.pb_ratio <= ?");
+        bindings.push(coerceNumber(params.maxPb, 999));
+      }
+      if (params.sector) {
+        conditions.push("t.sector LIKE ?");
+        bindings.push(`%${params.sector}%`);
+      }
+      if (params.minEpsGrowth !== undefined) {
+        conditions.push("f.eps_growth_yoy >= ?");
+        bindings.push(coerceNumber(params.minEpsGrowth, 0));
+      }
+      if (params.positiveFcf) {
+        conditions.push("f.free_cash_flow > 0");
+      }
+      if (params.lowDebt) {
+        conditions.push("f.total_debt < f.total_cash");
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const limit = Math.min(coerceNumber(params.limit, 30), 50);
+
+      // Get the latest fundamentals per ticker (most recent as_of_date)
+      const sql = `
+        SELECT f.*, t.name, t.sector, t.industry
+        FROM fundamentals f
+        INNER JOIN (
+          SELECT ticker, MAX(as_of_date) AS max_date
+          FROM fundamentals
+          GROUP BY ticker
+        ) latest ON f.ticker = latest.ticker AND f.as_of_date = latest.max_date
+        LEFT JOIN tickers t ON f.ticker = t.symbol
+        ${whereClause}
+        ORDER BY f.market_cap DESC
+        LIMIT ?
+      `;
+
+      const result = store._execSql(sql, [...bindings, limit]);
+
+      if (!result || result.length === 0) {
+        return text("No tickers match the specified fundamental criteria. Try broader filters.");
+      }
+
+      const lines = [
+        `=== FUNDAMENTAL SCREEN: ${result.length} tickers ===`,
+        "",
+      ];
+
+      for (const r of result) {
+        const ticker = String(r.ticker || "");
+        const name = String(r.name || "");
+        const sector = String(r.sector || "");
+        const pe = r.pe_ratio !== null ? Number(r.pe_ratio).toFixed(1) : "N/A";
+        const cap = r.market_cap !== null ? `$${(Number(r.market_cap) / 1e9).toFixed(1)}B` : "N/A";
+        const divYield = r.dividend_yield !== null ? `${(Number(r.dividend_yield) * 100).toFixed(2)}%` : "N/A";
+        const beta = r.beta !== null ? Number(r.beta).toFixed(2) : "N/A";
+        const pb = r.pb_ratio !== null ? Number(r.pb_ratio).toFixed(2) : "N/A";
+        const epsGrowth = r.eps_growth_yoy !== null ? `${(Number(r.eps_growth_yoy) * 100).toFixed(1)}%` : "N/A";
+        const fcf = r.free_cash_flow !== null ? `$${(Number(r.free_cash_flow) / 1e9).toFixed(1)}B` : "N/A";
+        const rev = r.revenue_ttm !== null ? `$${(Number(r.revenue_ttm) / 1e9).toFixed(1)}B` : "N/A";
+        const margin = r.net_margin !== null ? `${(Number(r.net_margin) * 100).toFixed(1)}%` : "N/A";
+
+        lines.push(`  [${ticker}] ${name}`);
+        lines.push(`    Sector: ${sector} | P/E: ${pe} | Mkt Cap: ${cap} | P/B: ${pb}`);
+        lines.push(`    Div Yield: ${divYield} | Beta: ${beta} | EPS Growth: ${epsGrowth}`);
+        lines.push(`    FCF: ${fcf} | Rev: ${rev} | Net Margin: ${margin}`);
+        lines.push("");
+      }
+
+      lines.push(`Use these results to create strategies for the most attractive value candidates.`);
+      lines.push(`Combine with get_ticker_technicals and search_signals for price action confirmation.`);
+
+      return text(lines.join("\n"));
+    } catch (e: any) {
+      return text("Error screening fundamentals: " + e.message);
+    }
+  },
+});
+
 // ── Strategist-only: sector / macro tools ─────────────────────────────────
 
 export const searchSectorSignalsTool = defineTool({
@@ -477,6 +643,6 @@ export const allStrategistTools = [
   scanRelativeVolumeTool, scanPreMarketGapsTool, scanRangeBreaksTool,
   scanRedditTool, scanXSocialTool, discoverOpportunitiesTool, searchSignalsTool, describeDatasetsTool,
   searchSectorSignalsTool, getMacroCalendarTool, consultMemoryTool, consultStrategistLessonsTool, listStrategiesTool,
-  queryTechnicalIndicatorsTool, getTickerTechnicalsTool,
+  queryTechnicalIndicatorsTool, getTickerTechnicalsTool, screenByFundamentalsTool,
   createStrategyTool, updateStrategyTool, archiveStrategyTool,
 ];
