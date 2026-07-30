@@ -16,6 +16,7 @@
  */
 
 import crypto from "crypto";
+import https from "https";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STOCKTWITS — free public API, no auth needed
@@ -215,6 +216,45 @@ export interface NitterTweet {
 }
 
 /**
+ * Fetch Nitter RSS using Node.js https module instead of fetch/undici.
+ * undici (Node.js fetch) gets empty responses from nitter.net's Caddy server
+ * due to TLS fingerprint or HTTP protocol differences. The native https module
+ * works fine.
+ */
+function fetchNitterRss(username: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${NITTER_BASE}/${username}/rss`);
+    const req = https.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/rss+xml, application/xml, text/xml, */*",
+      },
+      timeout: 15000,
+    }, (res) => {
+      if (res.statusCode === 404) {
+        res.resume();
+        resolve("");
+        return;
+      }
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      let body = "";
+      res.on("data", (chunk: string) => body += chunk);
+      res.on("end", () => resolve(body));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+  });
+}
+
+/**
  * Fetch a user's timeline from Nitter RSS and extract ticker mentions.
  * Rate-limited to 1 request per 30s, blacklisted for 10min on failure.
  */
@@ -234,32 +274,19 @@ async function fetchNitterUserFeed(username: string): Promise<NitterTweet[]> {
   _lastNitterFetch = Date.now();
 
   try {
-    const res = await fetch(`${NITTER_BASE}/${username}/rss`, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "application/rss+xml, application/xml, text/xml, */*",
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-
-    if (!res.ok) {
-      if (res.status === 404) return []; // Account not found
-      _lastNitterBlocked = Date.now();
-      console.warn(`[X-SOCIAL] Nitter ${username} returned ${res.status}`);
-      return [];
-    }
-
-    // Check if we got HTML (error page) or XML (RSS)
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("text/html")) {
-      // Nitter returned an error page
+    const xml = await fetchNitterRss(username);
+    if (!xml || xml.length < 100) {
+      // Empty body — nitter may be blocking us
       _lastNitterBlocked = Date.now();
       return [];
     }
 
-    const xml = await res.text();
-    if (!xml || xml.length < 100) return [];
+    // Check if we got HTML (error page) instead of XML
+    const trimmed = xml.trim();
+    if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
+      _lastNitterBlocked = Date.now();
+      return [];
+    }
 
     // Parse RSS items
     const tweets: NitterTweet[] = [];
