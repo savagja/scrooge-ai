@@ -739,36 +739,40 @@ async function buildPerceptionPrompt(
   lines.push("    Do NOT declare 'market closed' or 'session over' — you are mid-session.");
   lines.push("");
 
-  // ── CALIBRATION CHECKLIST ──────────────────────────────────────────────
+  // ── CALIBRATION CHECKLIST (only show if meaningful data exists) ────────
   const calibration = state.getCalibrationTable();
   const regimeCal = calibration.filter((c: any) => c.regime === market.regime);
-  if (regimeCal.length > 0) {
-    lines.push("═══ REGIME CALIBRATION CHECK (current regime: " + market.regime.toUpperCase() + ") ═══");
-    lines.push("Check each strategy\'s track record in this regime before placing a trade:");
+  const totalTrades = regimeCal.reduce((s: number, c: any) => s + c.totalTrades, 0);
+  if (regimeCal.length > 0 && totalTrades >= 10) {
+    lines.push("═══ REGIME CALIBRATION (current regime: " + market.regime.toUpperCase() + ") ═══");
+    lines.push("Small sample warning: only " + totalTrades + " total trades in this regime. Take with a grain of salt.");
     lines.push("");
     for (const c of regimeCal) {
       const winRate = c.totalTrades > 0 ? (c.wins / c.totalTrades * 100) : 0;
       let flag = "🆕 limited data";
-      if (winRate === 0 && c.totalTrades >= 3) flag = "⛔ SKIP — 0% win rate";
-      else if (winRate >= 60) flag = "✅ positive expectancy";
-      else if (winRate >= 40) flag = "➖ mixed results";
-      lines.push("  ☐ " + c.strategy + " in " + c.regime + ": " + c.wins + "/" + c.totalTrades + " wins (" + winRate.toFixed(0) + "%) — " + flag);
+      if (c.totalTrades >= 10) {
+        if (winRate >= 60) flag = "✅ positive expectancy";
+        else if (winRate >= 40) flag = "➖ mixed results";
+        else if (winRate < 40) flag = "⚠️ below average";
+      }
+      lines.push("  " + c.strategy + " in " + c.regime + ": " + c.wins + "/" + c.totalTrades + " wins (" + winRate.toFixed(0) + "%) — " + flag);
     }
     lines.push("");
   }
 
-  // ── RECENT MISTAKES FLAG ──────────────────────────────────────────────
+  // ── RECENT TRADES (brief, balanced) ──────────────────────────────────
   const todaysTrades = state.getTradesForDay(getTradingDate());
   const lastThree = todaysTrades.slice(-3);
-  const recentLosses = lastThree.filter((t: any) => t.pnl < -1);
-  if (recentLosses.length > 0) {
-    lines.push("═══ RECENT MISTAKES ═══");
-    lines.push("The following trades lost money last cycle. Consider why before repeating similar setups:");
+  if (lastThree.length > 0) {
+    const totalPnl = lastThree.reduce((s: number, t: any) => s + t.pnl, 0);
+    const icon = totalPnl >= 0 ? "✅" : "❌";
+    lines.push("═══ RECENT TRADES (last " + lastThree.length + ") ═══");
+    lines.push("  Net: " + icon + " $" + (totalPnl >= 0 ? "+" : "") + totalPnl.toFixed(2) + " across " + lastThree.length + " trades");
     lines.push("");
     for (const t of lastThree) {
-      const icon = t.pnl > 0 ? "✅" : t.pnl < -1 ? "❌" : "➖";
+      const tradeIcon = t.pnl > 0 ? "✅" : t.pnl < -1 ? "❌" : "➖";
       const exitPrice = t.exitPrice || t.entryPrice || 0;
-      lines.push("  " + icon + " " + t.symbol + " @ $" + exitPrice.toFixed(2) + ": " + (t.pnl >= 0 ? "+" : "") + "$" + t.pnl.toFixed(2) + " — " + t.strategy);
+      lines.push("  " + tradeIcon + " " + t.symbol + " @ $" + exitPrice.toFixed(2) + ": " + (t.pnl >= 0 ? "+" : "") + "$" + t.pnl.toFixed(2) + " — " + t.strategy);
     }
     lines.push("");
   }
