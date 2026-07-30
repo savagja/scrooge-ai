@@ -342,12 +342,15 @@ export async function fetchFinfluencerTweets(): Promise<
 
   // Fetch all accounts in parallel — nitter.net handles concurrent requests fine
   const results = await Promise.allSettled(
-    Object.keys(FINFLUENCER_ACCOUNTS).map((username) => fetchNitterUserFeed(username))
+    Object.entries(FINFLUENCER_ACCOUNTS).map(async ([username]) => ({
+      username,
+      tweets: await fetchNitterUserFeed(username),
+    }))
   );
 
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
-    const tweets = result.value;
+    const { username, tweets } = result.value;
     for (const tweet of tweets) {
       for (const ticker of tweet.tickers) {
         if (!tickerMap.has(ticker)) {
