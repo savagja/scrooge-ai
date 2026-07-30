@@ -117,9 +117,6 @@ export const fetchMarketDataTool = defineTool({
       getSpyChange(),
     ]);
 
-    const state = requireState();
-    const portfolio = state.getPortfolio();
-
     let regime = "unknown";
     if (vix !== null) {
       if (vix > 25) regime = "volatile";
