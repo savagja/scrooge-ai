@@ -82,6 +82,11 @@ export function evaluateBuySignal(params: {
   };
 }
 
+/**
+ * Compute exit plan metadata (stop price + nominal hold time).
+ * The holdUntil timestamp is stored for reference only — no time stop is enforced.
+ * The agent holds as long as the thesis is intact. Only hard stop and trailing stop are enforced.
+ */
 export function getExitPlan(entryPrice: number, holdMinutes: number): {
   exitTime: Date;
   stopPrice: number;

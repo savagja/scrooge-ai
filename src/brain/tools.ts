@@ -659,8 +659,8 @@ export const monitorPositionsTool = defineTool({
   label: "Monitor Positions",
   description:
     "Check all open positions for exit conditions. " +
-    "EXIT LOGIC: Losers get cut by time stop (30 min if not +1%) or hard stop (-3%). " +
-    "Winners (status 'green' or 'trailing') ride with a trailing stop (5% below peak). " +
+    "EXIT LOGIC: Hard stop (-3%) always active. Winners (status 'green' or 'trailing') ride with a trailing stop (5% below peak). " +
+    "No time stop — the agent holds as long as the thesis is intact. " +
     "Hold winners for days/weeks until trailing stop hits. " +
     "Returns which positions should be closed and why. Does NOT execute exits — call place_sell_order for each.",
   parameters: Type.Object({}),
@@ -796,7 +796,7 @@ export const placeBuyOrderTool = defineTool({
     ticker: Type.String({ description: "Ticker symbol to buy" }),
     notional: Type.Number({ description: "Dollar amount to invest (e.g. 25). If omitted, uses risk-based sizing." }),
     strategy: Type.String({ description: "Strategy name (news_momentum, mean_reversion, edgar_filings, etc.)" }),
-    holdMinutes: Type.Number({ default: 30, description: "Initial hold duration (30 min). Winners can extend indefinitely via trailing stop." }),
+    holdMinutes: Type.Number({ default: 30, description: "Initial hold duration (metadata only — no time stop enforced). Winners can extend indefinitely via trailing stop." }),
   }),
   execute: async (_id, params) => {
     const state = requireState();
@@ -928,7 +928,7 @@ export const placeShortOrderTool = defineTool({
     ticker: Type.String({ description: "Ticker symbol to short sell" }),
     notional: Type.Number({ description: "Dollar notional value of the short (e.g. 25). If omitted, uses risk-based sizing." }),
     strategy: Type.String({ description: "Strategy name (news_momentum, mean_reversion, edgar_filings, etc.)" }),
-    holdMinutes: Type.Number({ default: 30, description: "Initial hold duration (30 min). Winners can extend via trailing stop." }),
+    holdMinutes: Type.Number({ default: 30, description: "Initial hold duration (metadata only — no time stop enforced). Winners can extend via trailing stop." }),
   }),
   execute: async (_id, params) => {
     const state = requireState();
@@ -1087,7 +1087,7 @@ export const placeSellOrderTool = defineTool({
   description:
     "Execute a sell order to close an open position. No risk checks — exits are always allowed. " +
     "For LONG positions: sells shares. For SHORT positions: buys to cover (closes the short). " +
-    "Use when: stop hit, time stop reached, profit target met, or thesis invalidated.",
+    "Use when: stop hit, profit target met, thesis invalidated, or you decide to exit. No time stop — the agent holds as long as the thesis is intact.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker to sell" }),
     reason: Type.String({ description: "Why you are closing" }),

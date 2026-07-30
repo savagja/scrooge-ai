@@ -21,12 +21,12 @@ discovery:
 risk:
   stop_loss_pct: 0.03           # Hard stop: exit at -3% from entry
   trailing_stop_pct: 0.05       # Winners: exit if price drops 5% from peak (longs) or rises 5% from trough (shorts)
-  green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop, cancel time stop
+  green_threshold: 0.01        # Promotion threshold: +1% profit = activate trailing stop
   short_squeeze_threshold: 0.05 # Shorts: exit if price rises 5% intraday from entry
 
 # ─── Signal Filters ───────────────────────────────────────────
 signal:
-  hold_minutes: 30              # Initial time stop: 30 min to prove itself
+  hold_minutes: 30              # Initial hold duration (metadata only — no time stop enforced. Agent holds as long as thesis is intact.)
 
 # ─── Execution ────────────────────────────────────────────────
 execution:

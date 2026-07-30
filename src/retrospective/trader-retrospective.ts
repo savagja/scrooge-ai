@@ -128,7 +128,7 @@ You evaluate ONLY the TRADER's execution quality. You do NOT evaluate the strate
 
 ### 3. Position Management
 - Were positions promoted to trailing stop when they hit green (+1%)?
-- Were timely cuts made for positions that didn't work within the time stop (30 min)?
+- Were timely cuts made for positions where the thesis was invalidated (vs. waiting for the stop to hit)?
 - Did the trader avoid holding into obvious reversals?
 - Was the exit reason appropriate? ("stop hit" is fine, "panic" is not)
 
