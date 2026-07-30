@@ -1,0 +1,15 @@
+[Unit]
+Description=Scrooge Fundamentals Proxy Server (yfinance)
+After=network.target
+
+[Service]
+User=admin
+WorkingDirectory=/home/admin/scrooge
+ExecStart=/usr/bin/python3 /home/admin/scrooge/fundamentals-server.py --port 5001
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/admin/scrooge/logs/fundamentals-server.log
+StandardError=append:/home/admin/scrooge/logs/fundamentals-server.log
+
+[Install]
+WantedBy=multi-user.target

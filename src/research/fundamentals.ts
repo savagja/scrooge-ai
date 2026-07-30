@@ -76,68 +76,64 @@ interface YahooFundamentals {
 }
 
 async function fetchYahooFundamentals(symbol: string): Promise<YahooFundamentals | null> {
+  // Use the fundamentals proxy server instead of the broken Yahoo Finance v10 endpoint
+  // (which now requires crumb auth). The proxy runs a Python yfinance wrapper.
+  const proxyUrl = process.env.FUNDAMENTALS_PROXY_URL || "http://localhost:5001";
   try {
-    // Use Yahoo Finance v10 quote-summary endpoint — returns comprehensive fundamentals
-    // No auth needed. Uses the publicly available YQL/YFinance API.
-    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=assetProfile,summaryDetail,financialData,defaultKeyStatistics,price`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
+    const res = await fetch(`${proxyUrl}/fundamentals/${encodeURIComponent(symbol)}`, {
+      headers: { "User-Agent": "scrooge/1.0" },
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
-      // Try the chart API as fallback for basic metadata
+      console.warn(`[FUNDAMENTALS] Proxy returned ${res.status} for ${symbol}, falling back to chart API`);
       return fetchYahooChartFallback(symbol);
     }
     const data = await res.json();
-    const qs = data?.quoteSummary?.result?.[0];
-    if (!qs) return fetchYahooChartFallback(symbol);
-
-    const sp = qs.summaryDetail || {};
-    const kd = qs.defaultKeyStatistics || {};
-    const fd = qs.financialData || {};
-    const ap = qs.assetProfile || {};
-    const pr = qs.price || {};
+    if (data.error) {
+      console.warn(`[FUNDAMENTALS] Proxy error for ${symbol}: ${data.error}`);
+      return fetchYahooChartFallback(symbol);
+    }
 
     return {
-      longName: pr.longName || pr.shortName || null,
-      sector: ap.sector || null,
-      industry: ap.industry || null,
-      marketCap: sp.marketCap?.raw ?? null,
-      enterpriseValue: kd.enterpriseValue?.raw ?? null,
-      peRatio: sp.trailingPE?.raw ?? null,
-      forwardPe: sp.forwardPE?.raw ?? null,
-      psRatio: kd.priceToSalesTrailing12Months?.raw ?? null,
-      pbRatio: kd.priceToBook?.raw ?? null,
-      evToEbitda: kd.enterpriseToEbitda?.raw ?? null,
-      dividendYield: sp.dividendYield?.raw ?? null,
-      dividendRate: sp.dividendRate?.raw ?? null,
-      payoutRatio: kd.payoutRatio?.raw ?? null,
-      fiveYearAvgDividendYield: sp.fiveYearAvgDividendYield?.raw ?? null,
-      totalCash: fd.totalCash?.raw ?? null,
-      totalDebt: fd.totalDebt?.raw ?? null,
-      bookValue: kd.bookValue?.raw ?? null,
-      freeCashFlow: fd.freeCashFlow?.raw ?? null,
-      operatingCashFlow: fd.operatingCashflow?.raw ?? null,
-      revenueTtm: fd.totalRevenue?.raw ?? null,
-      grossMargin: fd.grossMargins?.raw ?? null,
-      operatingMargin: fd.operatingMargins?.raw ?? null,
-      netMargin: fd.profitMargins?.raw ?? null,
-      epsTtm: kd.trailingEps?.raw ?? null,
-      epsForward: kd.forwardEps?.raw ?? null,
-      epsGrowthYoY: kd.earningsQuarterlyGrowth?.raw ?? null,
-      revenueGrowthYoY: fd.revenueGrowth?.raw ?? null,
-      fiftyTwoWeekHigh: sp.fiftyTwoWeekHigh?.raw ?? null,
-      fiftyTwoWeekLow: sp.fiftyTwoWeekLow?.raw ?? null,
-      fiftyDayAverage: sp.fiftyDayAverage?.raw ?? null,
-      twoHundredDayAverage: sp.twoHundredDayAverage?.raw ?? null,
-      beta: sp.beta?.raw ?? null,
-      avgVolume10d: sp.averageVolume10days?.raw ?? null,
-      avgVolume30d: sp.averageVolume?.raw ?? null,
-      regularMarketPrice: pr.regularMarketPrice?.raw ?? null,
-      regularMarketVolume: pr.regularMarketVolume?.raw ?? null,
+      longName: data.longName ?? null,
+      sector: data.sector ?? null,
+      industry: data.industry ?? null,
+      marketCap: data.marketCap ?? null,
+      enterpriseValue: data.enterpriseValue ?? null,
+      peRatio: data.peRatio ?? null,
+      forwardPe: data.forwardPe ?? null,
+      psRatio: data.psRatio ?? null,
+      pbRatio: data.pbRatio ?? null,
+      evToEbitda: data.evToEbitda ?? null,
+      dividendYield: data.dividendYield ?? null,
+      dividendRate: data.dividendRate ?? null,
+      payoutRatio: data.payoutRatio ?? null,
+      fiveYearAvgDividendYield: data.fiveYearAvgDividendYield ?? null,
+      totalCash: data.totalCash ?? null,
+      totalDebt: data.totalDebt ?? null,
+      bookValue: data.bookValue ?? null,
+      freeCashFlow: data.freeCashFlow ?? null,
+      operatingCashFlow: data.operatingCashFlow ?? null,
+      revenueTtm: data.revenueTtm ?? null,
+      grossMargin: data.grossMargin ?? null,
+      operatingMargin: data.operatingMargin ?? null,
+      netMargin: data.netMargin ?? null,
+      epsTtm: data.epsTtm ?? null,
+      epsForward: data.epsForward ?? null,
+      epsGrowthYoY: data.epsGrowthYoY ?? null,
+      revenueGrowthYoY: data.revenueGrowthYoY ?? null,
+      fiftyTwoWeekHigh: data.fiftyTwoWeekHigh ?? null,
+      fiftyTwoWeekLow: data.fiftyTwoWeekLow ?? null,
+      fiftyDayAverage: data.fiftyDayAverage ?? null,
+      twoHundredDayAverage: data.twoHundredDayAverage ?? null,
+      beta: data.beta ?? null,
+      avgVolume10d: data.avgVolume10d ?? null,
+      avgVolume30d: data.avgVolume30d ?? null,
+      regularMarketPrice: data.regularMarketPrice ?? null,
+      regularMarketVolume: data.regularMarketVolume ?? null,
     };
-  } catch {
+  } catch (e: any) {
+    console.warn(`[FUNDAMENTALS] Proxy fetch failed for ${symbol}: ${e?.message ?? e}, falling back to chart API`);
     return fetchYahooChartFallback(symbol);
   }
 }
