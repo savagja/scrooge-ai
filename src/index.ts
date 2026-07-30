@@ -221,9 +221,9 @@ async function main(isRetry = false) {
 
   // ─── EVENT LOOP ────────────────────────────────────────────────────────────
 
-  let loopCount = 0;
   let lastAgentOutput = "";
   let _lastRegime: string | null = null;
+  let _lastHeartbeatTime = 0;
 
   session.subscribe((event) => {
     if (event.type === "message_update") {
@@ -274,17 +274,10 @@ async function main(isRetry = false) {
     // Continuous loop. Each cycle is wrapped in its own try/catch so
     // a single failed fetch (Yahoo timeout, Alpaca blip) doesn't kill the entire process.
     while (true) {
-      loopCount++;
+      // Reload config every iteration (so user can tune without restart)
+      reloadConfig();
 
-      // Reload config periodically (so user can tune without restart)
-      if (loopCount % 20 === 0) {
-        reloadConfig();
-      }
-
-      // Re-discover tickers periodically
-      if (cfg.discovery.enabled && loopCount % cfg.discovery.refreshIntervalCycles === 0) {
-        // getWatchlist() in tools.ts handles this automatically
-      }
+      // Re-discover tickers is handled by getWatchlist() in tools.ts on every tool call
 
       await new Promise((r) => setTimeout(r, cfg.pollIntervalMs));
 
@@ -340,7 +333,7 @@ async function main(isRetry = false) {
 
       // ── REGIME SHIFT DETECTION ────────────────────────────────────────
       // Track regime changes and log them to the activity stream
-      if (loopCount > 1 && _lastRegime && _lastRegime !== marketState.regime) {
+      if (_lastRegime && _lastRegime !== marketState.regime) {
         state.recordActivity("regime_shift", `Market regime changed from ${_lastRegime} → ${marketState.regime} (VIX ${marketState.vix?.toFixed(1) ?? "?"}, SPY ${marketState.spyChangePct?.toFixed(1) ?? "?"}%)`, {
           details: `Regime transition detected: ${_lastRegime} → ${marketState.regime}. Adjusting strategy bias accordingly.`,
           metadata: { from: _lastRegime, to: marketState.regime, vix: marketState.vix, spyChange: marketState.spyChangePct },
@@ -348,17 +341,16 @@ async function main(isRetry = false) {
       }
       _lastRegime = marketState.regime;
 
-      const perceptionPrompt = await buildPerceptionPrompt(marketState, ctx, state, loopCount, cfg, currentClock);
+      const perceptionPrompt = await buildPerceptionPrompt(marketState, ctx, state, cfg, currentClock);
 
       // Log this cycle to the activity stream
       const positionsForLog = state.getPositions();
       const regimeLabel = marketState.regime;
       state.recordActivity("cycle",
-        `Cycle ${loopCount}: ${regimeLabel.toUpperCase()} market | ${positionsForLog.length} positions | VIX ${marketState.vix?.toFixed(1) ?? "?"} | daily P&L $${state.getDailyPnL().toFixed(2)}`,
+        `${regimeLabel.toUpperCase()} market | ${positionsForLog.length} positions | VIX ${marketState.vix?.toFixed(1) ?? "?"} | daily P&L $${state.getDailyPnL().toFixed(2)}`,
         {
           details: `VIX=${marketState.vix?.toFixed(1) ?? "?"}, SPY=${marketState.spyChangePct?.toFixed(2) ?? "?"}%, breadth=${marketState.breadth}, regime=${regimeLabel}, positions=${positionsForLog.length}, cash=$${state.getCash().toFixed(2)}, dailyPnL=$${state.getDailyPnL().toFixed(2)}`,
-          metadata: {
-            cycle: loopCount, regime: regimeLabel, vix: marketState.vix,
+          metadata: { regime: regimeLabel, vix: marketState.vix,
             spyChange: marketState.spyChangePct, breadth: marketState.breadth,
             positionsCount: positionsForLog.length, cash: state.getCash(),
             dailyPnL: state.getDailyPnL()
@@ -366,18 +358,19 @@ async function main(isRetry = false) {
         }
       );
 
-      console.log(`[${now}] 📡 Cycle ${loopCount} — perception sent...`);
+      console.log(`[${now}] 📡 Perception sent...`);
 
       try {
         await session.prompt(perceptionPrompt);
       } catch (promptErr: any) {
-        console.error(`[${now}] ⚠️  Agent cycle ${loopCount} failed (continuing loop):`, promptErr.message ?? promptErr);
-        state.recordActivity("cycle_error", `Cycle ${loopCount} failed: ${promptErr.message ?? "unknown error"}`, {
-          metadata: { cycle: loopCount },
-        });
+        console.error(`[${now}] ⚠️  Agent cycle failed (continuing loop):`, promptErr.message ?? promptErr);
+        state.recordActivity("cycle_error", `Cycle failed: ${promptErr.message ?? "unknown error"}`);
       }
 
-      if (loopCount % 10 === 0) {
+      // Heartbeat log every ~10 minutes (at 2min poll interval, that's 5 iterations)
+      const nowMs = Date.now();
+      if (nowMs - _lastHeartbeatTime > 600000) {
+        _lastHeartbeatTime = nowMs;
         console.log(`[${now}] 💓 Heartbeat | Positions: ${state.getPositions().length} | P&L: $${state.getDailyPnL().toFixed(2)} | Cash: $${state.getCash().toFixed(2)}`);
       }
     }
@@ -434,7 +427,6 @@ async function buildPerceptionPrompt(
   market: MarketState,
   ctx: any,
   state: PortfolioState,
-  cycle: number,
   cfg: ReturnType<typeof getConfig>,
   clock?: { timestamp: string; isOpen: boolean; nextClose: string }
 ): Promise<string> {
@@ -465,7 +457,7 @@ async function buildPerceptionPrompt(
   const lessonsFormatted = state.formatLessonsForPrompt();
 
   const lines: string[] = [
-    `=== MARKET UPDATE (Cycle ${cycle}) ===`,
+    `=== MARKET UPDATE ===`,
     ``,
     `Current Market State:`,
     `  Time: ${market.timestamp}`,

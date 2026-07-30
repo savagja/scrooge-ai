@@ -340,15 +340,11 @@ async function main() {
   // MAIN LOOP
   // ═══════════════════════════════════════════════════════════════════════
 
-  let cycleNumber = 0;
+  let _lastMidSessionRun = 0;
 
   while (true) {
-    cycleNumber++;
-
-    // Reload config periodically
-    if (cycleNumber % 10 === 0) {
-      reloadConfig();
-    }
+    // Reload config every iteration
+    reloadConfig();
 
     try {
       const clock = await getClock();
@@ -360,9 +356,9 @@ async function main() {
         const msToOpen = new Date(clock.nextOpen).getTime() - Date.now();
         const minutesToOpen = msToOpen / 60000;
 
-        if (minutesToOpen <= 30 && minutesToOpen > 0 && cycleNumber % 3 === 0) {
+        if (minutesToOpen <= 30 && minutesToOpen > 0) {
           console.log("[" + now + "] Pre-market window (" + minutesToOpen.toFixed(0) + " min to open) — running strategist...");
-          await runStrategistSession(state, strategies, cfg, "pre-market", cycleNumber);
+          await runStrategistSession(state, strategies, cfg, "pre-market");
         } else if (minutesToOpen < 0) {
           // Market has closed — we're in after-hours
           console.log("[" + now + "] Market closed. Strategist sleeping until pre-market window.");
@@ -377,14 +373,18 @@ async function main() {
         }
       } else {
         // ── MARKET OPEN ──────────────────────────────────────────────────
-        if (cycleNumber % 6 === 0 || cycleNumber === 1) {
-          console.log("[" + now + "] Market open — running strategist cycle " + cycleNumber + "...");
-          await runStrategistSession(state, strategies, cfg, "mid-session", cycleNumber);
+        // Run mid-session every ~12 minutes (at 2min poll interval, that's 6 iterations)
+        // Use a time-based check so process restarts don't affect cadence
+        const nowMs = Date.now();
+        if (nowMs - _lastMidSessionRun > 720000) { // 12 minutes
+          _lastMidSessionRun = nowMs;
+          console.log("[" + now + "] Market open — running strategist session...");
+          await runStrategistSession(state, strategies, cfg, "mid-session");
         }
       }
     } catch (cycleErr: any) {
       // Individual cycle crashed (network timeout, API error, etc.) — log and continue
-      console.error("[" + new Date().toISOString() + "] ⚠️  Strategist cycle " + cycleNumber + " failed (continuing loop):", cycleErr.message ?? cycleErr);
+      console.error("[" + new Date().toISOString() + "] ⚠️  Strategist session failed (continuing loop):", cycleErr.message ?? cycleErr);
     }
 
     // Sleep for the poll interval
@@ -396,10 +396,32 @@ async function runStrategistSession(
   state: PortfolioState,
   strategies: StrategyStore,
   cfg: ReturnType<typeof getConfig>,
-  sessionType: "pre-market" | "mid-session",
-  cycle: number
+  sessionType: "pre-market" | "mid-session"
 ) {
   const clock = await getClock();
+
+  // Format current ET time from Alpaca clock
+  let etTimeStr = "";
+  let etDateStr = "";
+  if (clock) {
+    const clockTs = new Date(clock.timestamp);
+    etTimeStr = clockTs.toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    });
+    etDateStr = clockTs.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  }
+
   console.log("  Strategist session: " + sessionType + " | Market: " + (clock.isOpen ? "OPEN" : "CLOSED"));
 
   // Prune stale candidates first
@@ -422,8 +444,10 @@ async function runStrategistSession(
   );
 
   // Build session prompt based on session type
+  const clockHeader = "Current Eastern Time: " + etDateStr + " — " + etTimeStr + "";
   const sessionPrompt = sessionType === "pre-market"
     ? "=== STRATEGIST PRE-MARKET SESSION ===\n\n" +
+      clockHeader + "\n\n" +
       "The market opens in ~30 minutes. The research DB has been accumulating signals overnight.\n\n" +
       "YOUR TASKS:\n" +
       "1. consult_strategist_lessons — review lessons from past retrospectives about signal quality and strategy×regime fit\n" +
@@ -447,7 +471,8 @@ async function runStrategistSession(
       "OUTPUT FORMAT: Discuss strategies using `### TICKER —` headers followed by your narrative commentary. " +
       "Do NOT repeat thesis/catalyst/entry/exit conditions — those are in the database. " +
       "Cover: lifecycle actions, market observations, per-strategy narrative, and any warnings."
-    : "=== STRATEGIST MID-SESSION UPDATE (Cycle " + cycle + ") ===\n\n" +
+    : "=== STRATEGIST MID-SESSION UPDATE ===\n\n" +
+      clockHeader + "\n\n" +
       "The market is open. New signals have accumulated since your last check.\n\n" +
       "YOUR TASKS:\n" +
       "1. consult_strategist_lessons — review active lessons for signal quality patterns\n" +
