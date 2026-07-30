@@ -103,7 +103,8 @@ export const fetchMarketDataTool = defineTool({
   description:
     "Get current market regime data: VIX, SPY change, market breadth, and regime classification. " +
     "Use this before making any trading decision to understand the current environment.",
-  parameters: Type.Object({}),
+  parameters: Type.Object({}, { additionalProperties: true }),
+  prepareArguments: () => ({}),
   execute: async () => {
     console.log("[MARKET] fetch_market_data execute called");
     try {
