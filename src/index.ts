@@ -798,8 +798,9 @@ async function buildPerceptionPrompt(
   lines.push("   - Use the ABSTRACTION PATTERN to assess regime fit: `momentum long trending_up works catalyst:news`.");
   lines.push("8. If a candidate strategy has a strong thesis + confirming price action + good historical grade → place_buy_order or place_short_order.");
   lines.push("9. If nothing passes your bar → hold_cash (explain why).");
-  lines.push("10. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
-  lines.push("11. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
+  lines.push("10. REGIME IS NOT A FILTER: The strategist designs strategies for the current market. Don't skip a good setup because the market is trending down — the strategist already factored that in. Evaluate each strategy on its own price action and thesis.");
+  lines.push("11. Remember: hard stops + trailing stops protect you. Use that freedom to take smart bets.");
+  lines.push("12. Cash doesn't compound — but bad trades don't either. Be decisive, not reckless.");
   lines.push("");
   lines.push("⚠️  IMPORTANT RESTRICTIONS:");
   lines.push("    • You have NO research tools. Do NOT try to analyze tickers beyond what is provided.");
