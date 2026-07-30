@@ -231,7 +231,7 @@ function fetchNitterRss(username: string): Promise<string> {
           "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Accept: "application/rss+xml, application/xml, text/xml, */*",
       },
-      timeout: 15000,
+      timeout: 30000,
     }, (res) => {
       if (res.statusCode === 404) {
         res.resume();
