@@ -201,8 +201,9 @@ const NITTER_BASE = "https://nitter.net";
 const NITTER_RATE_LIMIT_MS = 30000; // 30s between Nitter requests
 const NITTER_BLACKLIST_MS = 10 * 60 * 1000; // 10 min blacklist on failure
 
-let _lastNitterFetch = 0;
-let _lastNitterBlocked = 0;
+// Per-account rate limiting and blacklist so one account failure doesn't block others
+const _lastNitterFetch = new Map<string, number>();
+const _lastNitterBlocked = new Map<string, number>();
 
 export interface NitterTweet {
   id: string;
@@ -261,30 +262,32 @@ function fetchNitterRss(username: string): Promise<string> {
 async function fetchNitterUserFeed(username: string): Promise<NitterTweet[]> {
   const now = Date.now();
 
-  // If Nitter recently blocked us, skip
-  if (now - _lastNitterBlocked < NITTER_BLACKLIST_MS) {
+  // Per-account blacklist: if this account recently failed, skip
+  const lastBlocked = _lastNitterBlocked.get(username) || 0;
+  if (now - lastBlocked < NITTER_BLACKLIST_MS) {
     return [];
   }
 
-  // Rate limit
-  const elapsed = now - _lastNitterFetch;
+  // Per-account rate limit: 30s between requests to the same account
+  const lastFetch = _lastNitterFetch.get(username) || 0;
+  const elapsed = now - lastFetch;
   if (elapsed < NITTER_RATE_LIMIT_MS) {
     await new Promise((r) => setTimeout(r, NITTER_RATE_LIMIT_MS - elapsed));
   }
-  _lastNitterFetch = Date.now();
+  _lastNitterFetch.set(username, Date.now());
 
   try {
     const xml = await fetchNitterRss(username);
     if (!xml || xml.length < 100) {
       // Empty body — nitter may be blocking us
-      _lastNitterBlocked = Date.now();
+      _lastNitterBlocked.set(username, Date.now());
       return [];
     }
 
     // Check if we got HTML (error page) instead of XML
     const trimmed = xml.trim();
     if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
-      _lastNitterBlocked = Date.now();
+      _lastNitterBlocked.set(username, Date.now());
       return [];
     }
 
