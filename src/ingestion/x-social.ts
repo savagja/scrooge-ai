@@ -365,7 +365,7 @@ export async function fetchFinfluencerTweets(): Promise<
   // Count unique accounts per ticker
   for (const [ticker] of tickerMap) {
     const uniqueAccounts = new Set<string>();
-    for (const [key] of accountsWithTicker) {
+    for (const key of accountsWithTicker) {
       if (key.startsWith(`${ticker}:`)) {
         uniqueAccounts.add(key.split(":")[1]);
       }
