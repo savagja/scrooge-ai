@@ -1421,7 +1421,8 @@ export const findSimilarTradesTool = defineTool({
   description:
     "Query the vector memory for past trades with similar market conditions to a prospective setup. " +
     "Returns the N most similar historical trades with their outcomes (win/loss, P&L%). " +
-    "Use BEFORE entering a trade to sanity-check: has this exact situation worked before?",
+    "Small sample warning: with fewer than 10 similar trades, the data is not statistically meaningful. " +
+    "Use the strategist's thesis and price action as your primary signal, not this.",
   parameters: Type.Object({
     ticker: Type.String({ description: "Ticker you're evaluating" }),
     vix: NumStr,
@@ -1480,12 +1481,14 @@ export const findSimilarTradesTool = defineTool({
     }
 
     lines.push("");
-    if (winRate >= 60) {
-      lines.push("🟢 Historical edge detected. Similar setups have performed well.");
+    if (similar.length < 10) {
+      lines.push("📊 Small sample (" + similar.length + " trades). This data is not statistically meaningful — use the strategist's thesis and your own price-action judgment.");
+    } else if (winRate >= 60) {
+      lines.push("🟢 Similar setups have performed well (" + similar.length + " samples). Stronger conviction.");
     } else if (winRate <= 40) {
-      lines.push("🔴 Historical warning. Similar setups have underperformed.");
+      lines.push("🟡 Similar setups have underperformed (" + similar.length + " samples). Cross-check against thesis and price action before skipping.");
     } else {
-      lines.push("🟡 No clear historical edge. Proceed with caution.");
+      lines.push("➖ Mixed results in similar conditions. Rely on the strategist's thesis + current price action.");
     }
 
     return {

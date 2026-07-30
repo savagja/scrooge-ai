@@ -81,5 +81,5 @@ When you close a position, call update_strategy_on_exit to record whether the st
 - Trailing stop (5%): Gains locked incrementally
 - **No time stop**: You hold as long as the thesis is intact. Only the hard stop and trailing stop are enforced.
 
-## ALWAYS use find_similar_trades BEFORE place_buy_order
-Past similar trades and lessons are your best risk management tool.`;
+## Optionally use find_similar_trades for context
+You can check similar past trades for extra context, but don't let sparse data override a strong thesis. The strategist's research + your price-action judgment are more reliable than a handful of past trades with different conditions.`;
