@@ -105,10 +105,16 @@ export const fetchMarketDataTool = defineTool({
     "Use this before making any trading decision to understand the current environment.",
   parameters: Type.Object({}),
   execute: async () => {
-    const [vix, spyChange, clock] = await Promise.all([
+    let clock: { isOpen: boolean; nextOpen: string; nextClose: string; timestamp: string } | null = null;
+    try {
+      clock = await getClock();
+    } catch (e) {
+      console.warn("[MARKET] Clock fetch failed:", e);
+    }
+
+    const [vix, spyChange] = await Promise.all([
       getVix(),
       getSpyChange(),
-      getClock(),
     ]);
 
     const state = requireState();
@@ -131,8 +137,8 @@ export const fetchMarketDataTool = defineTool({
 
     const text = [
       `MARKET STATE (as of ${new Date().toISOString()}):`,
-      `- Market: ${clock.isOpen ? "OPEN" : "CLOSED"}`,
-      `- Next Close: ${clock.nextClose}`,
+      `- Market: ${clock?.isOpen !== undefined ? (clock.isOpen ? "OPEN" : "CLOSED") : "unavailable"}`,
+      `- Next Close: ${clock?.nextClose ?? "unavailable"}`,
       `- VIX: ${vix?.toFixed(2) ?? "unavailable"}`,
       `- SPY Change: ${spyChange !== null ? `${spyChange.toFixed(2)}%` : "unavailable"}`,
       `- Active Watchlist: ${_watchlist.length} seed + ${_discovered.length} discovered`,
@@ -148,7 +154,7 @@ export const fetchMarketDataTool = defineTool({
 
     return {
       content: [{ type: "text", text }],
-      details: { vix, spyChange, regime, breadth, isOpen: clock.isOpen },
+      details: { vix, spyChange, regime, breadth, isOpen: clock?.isOpen ?? false },
     };
   },
 });
