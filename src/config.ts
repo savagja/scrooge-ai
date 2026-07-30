@@ -100,7 +100,7 @@ function loadConfig(): AppConfig {
 
   return {
     initialCapital: num("INITIAL_CAPITAL", ["initial_capital"], 100),
-    pollIntervalMs: num("POLL_INTERVAL_MS", ["poll_interval_ms"], 120000),
+    pollIntervalMs: num("POLL_INTERVAL_MS", ["poll_interval_ms"], 300000),
     watchlist: strArr(["watchlist"], [
       "AAPL", "TSLA", "NVDA", "AMD", "MSFT", "AMZN",
       "GOOGL", "META", "NFLX", "CRM", "PLTR", "COIN",

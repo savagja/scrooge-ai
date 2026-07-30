@@ -373,7 +373,7 @@ async function main() {
         }
       } else {
         // ── MARKET OPEN ──────────────────────────────────────────────────
-        // Run mid-session every ~12 minutes (at 2min poll interval, that's 6 iterations)
+        // Run mid-session every ~12 minutes (at 5min poll interval, that's ~2 iterations)
         // Use a time-based check so process restarts don't affect cadence
         const nowMs = Date.now();
         if (nowMs - _lastMidSessionRun > 720000) { // 12 minutes
