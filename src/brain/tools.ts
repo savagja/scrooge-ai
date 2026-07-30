@@ -105,54 +105,62 @@ export const fetchMarketDataTool = defineTool({
     "Use this before making any trading decision to understand the current environment.",
   parameters: Type.Object({}),
   execute: async () => {
-    let clock: { isOpen: boolean; nextOpen: string; nextClose: string; timestamp: string } | null = null;
     try {
-      clock = await getClock();
+      let clock: { isOpen: boolean; nextOpen: string; nextClose: string; timestamp: string } | null = null;
+      try {
+        clock = await getClock();
+      } catch (e) {
+        console.warn("[MARKET] Clock fetch failed:", e);
+      }
+
+      const [vix, spyChange] = await Promise.all([
+        getVix(),
+        getSpyChange(),
+      ]);
+
+      let regime = "unknown";
+      if (vix !== null) {
+        if (vix > 25) regime = "volatile";
+        else if (spyChange !== null && spyChange > 0.5) regime = "trending_up";
+        else if (spyChange !== null && spyChange < -0.5) regime = "trending_down";
+        else if (vix < 18) regime = "chop";
+        else regime = "chop";
+      }
+
+      const breadth = spyChange !== null && Math.abs(spyChange) > 1
+        ? "strong"
+        : spyChange !== null && Math.abs(spyChange) > 0.5
+          ? "neutral"
+          : "weak";
+
+      const text = [
+        `MARKET STATE (as of ${new Date().toISOString()}):`,
+        `- Market: ${clock?.isOpen !== undefined ? (clock.isOpen ? "OPEN" : "CLOSED") : "unavailable"}`,
+        `- Next Close: ${clock?.nextClose ?? "unavailable"}`,
+        `- VIX: ${vix?.toFixed(2) ?? "unavailable"}`,
+        `- SPY Change: ${spyChange !== null ? `${spyChange.toFixed(2)}%` : "unavailable"}`,
+        `- Active Watchlist: ${_watchlist.length} seed + ${_discovered.length} discovered`,
+        `- Breadth: ${breadth}`,
+        `- Regime: ${regime}`,
+        `- Risk Settings: 3% hard stop, 5% trailing stop, squeeze protection at 5% (no time limit — agent decides when to exit)`,
+        "",
+        regime === "trending_up" ? "Uptrend. Consider momentum plays or shorts on overextended names with catalysts."
+          : regime === "trending_down" ? "Downtrend. Cash is king. Only high-conviction setups."
+            : regime === "volatile" ? "High volatility. Size down or hold cash."
+              : "Choppy, range-bound. Mean-reversion favored. Breakouts often fake.",
+      ].join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: { vix, spyChange, regime, breadth, isOpen: clock?.isOpen ?? false },
+      };
     } catch (e) {
-      console.warn("[MARKET] Clock fetch failed:", e);
+      console.error("[MARKET] fetch_market_data unexpected error:", e);
+      return {
+        content: [{ type: "text", text: `MARKET STATE unavailable — error: ${e instanceof Error ? e.message : String(e)}` }],
+        details: { vix: null, spyChange: null, regime: "unknown", breadth: "unknown", isOpen: false },
+      };
     }
-
-    const [vix, spyChange] = await Promise.all([
-      getVix(),
-      getSpyChange(),
-    ]);
-
-    let regime = "unknown";
-    if (vix !== null) {
-      if (vix > 25) regime = "volatile";
-      else if (spyChange !== null && spyChange > 0.5) regime = "trending_up";
-      else if (spyChange !== null && spyChange < -0.5) regime = "trending_down";
-      else if (vix < 18) regime = "chop";
-      else regime = "chop";
-    }
-
-    const breadth = spyChange !== null && Math.abs(spyChange) > 1
-      ? "strong"
-      : spyChange !== null && Math.abs(spyChange) > 0.5
-        ? "neutral"
-        : "weak";
-
-    const text = [
-      `MARKET STATE (as of ${new Date().toISOString()}):`,
-      `- Market: ${clock?.isOpen !== undefined ? (clock.isOpen ? "OPEN" : "CLOSED") : "unavailable"}`,
-      `- Next Close: ${clock?.nextClose ?? "unavailable"}`,
-      `- VIX: ${vix?.toFixed(2) ?? "unavailable"}`,
-      `- SPY Change: ${spyChange !== null ? `${spyChange.toFixed(2)}%` : "unavailable"}`,
-      `- Active Watchlist: ${_watchlist.length} seed + ${_discovered.length} discovered`,
-      `- Breadth: ${breadth}`,
-      `- Regime: ${regime}`,
-      `- Risk Settings: 3% hard stop, 5% trailing stop, squeeze protection at 5% (no time limit — agent decides when to exit)`,
-      "",
-      regime === "trending_up" ? "Uptrend. Consider momentum plays or shorts on overextended names with catalysts."
-        : regime === "trending_down" ? "Downtrend. Cash is king. Only high-conviction setups."
-          : regime === "volatile" ? "High volatility. Size down or hold cash."
-            : "Choppy, range-bound. Mean-reversion favored. Breakouts often fake.",
-    ].join("\n");
-
-    return {
-      content: [{ type: "text", text }],
-      details: { vix, spyChange, regime, breadth, isOpen: clock?.isOpen ?? false },
-    };
   },
 });
 
