@@ -105,6 +105,7 @@ export const fetchMarketDataTool = defineTool({
     "Use this before making any trading decision to understand the current environment.",
   parameters: Type.Object({}),
   execute: async () => {
+    console.log("[MARKET] fetch_market_data execute called");
     try {
       let clock: { isOpen: boolean; nextOpen: string; nextClose: string; timestamp: string } | null = null;
       try {
@@ -150,6 +151,7 @@ export const fetchMarketDataTool = defineTool({
               : "Choppy, range-bound. Mean-reversion favored. Breakouts often fake.",
       ].join("\n");
 
+      console.log("[MARKET] fetch_market_data returning success");
       return {
         content: [{ type: "text", text }],
         details: { vix, spyChange, regime, breadth, isOpen: clock?.isOpen ?? false },
