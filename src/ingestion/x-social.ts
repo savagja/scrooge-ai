@@ -345,7 +345,7 @@ export async function fetchFinfluencerTweets(): Promise<
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
     const tweets = result.value;
-    for (const tweet of tweets {
+    for (const tweet of tweets) {
       for (const ticker of tweet.tickers) {
         if (!tickerMap.has(ticker)) {
           tickerMap.set(ticker, { tweets: [], accountCount: 0 });
